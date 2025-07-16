@@ -1,0 +1,2632 @@
+---
+title: "Nasal occlusion"
+output: html_document
+date: "2025-05-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#Setting working directory
+setwd("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#setting custom path
+.libPaths("/scratch/prj/dn_hamidlab_msc_proj/Libraries")
+```
+
+
+
+
+```{r}
+#load the libraries needed
+## load dependencies
+library(tidyverse)
+library(Seurat)
+library(SeuratObject)
+library(sp)
+library(scDblFinder)
+library(SingleCellExperiment)
+#library(SeuratWrappers)
+#library(SeuratDisk)
+library(patchwork)
+library(clustree)
+library(dplyr)
+library(XML)
+library(Matrix)
+library(glmGamPoi)
+library(gprofiler2)
+library(harmony)
+library(purrr)
+library(limma)
+library(umap)
+library(pheatmap)
+library(fgsea)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(rrvgo)
+library(slingshot)
+library(destiny)
+library(tradeSeq)
+library(EnhancedVolcano)
+```
+
+```{r}
+# Set file paths
+data_dir <- "/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/GSE157119_RAW"
+
+matrix_file   <- file.path(data_dir, "GSE157119_aggregation_matrix.mtx.gz")
+features_file <- file.path(data_dir, "GSE157119_aggregation_features.tsv.gz")
+barcodes_file <- file.path(data_dir, "GSE157119_aggregation_barcodes.tsv.gz")
+
+# Read the matrix using ReadMtx
+nasal_counts <- ReadMtx(mtx = matrix_file,
+                        features = features_file,
+                        cells = barcodes_file)
+
+# Create Seurat object
+nasal_seurat <- CreateSeuratObject(counts = nasal_counts,
+                                   project = "GSE157119")
+
+# Label cells based on barcode suffix
+nasal_seurat$condition <- ifelse(grepl("-1$", colnames(nasal_seurat)), "closed", "open")
+
+# Preview
+nasal_seurat
+```
+
+
+```{r}
+# Convert to SingleCellExperiment
+sce <- as.SingleCellExperiment(nasal_seurat)
+
+# Run scDblFinder
+sce <- scDblFinder(sce)
+
+# Add doublet classifications back to Seurat object
+nasal_seurat$scDblFinder.class <- sce$scDblFinder.class
+
+```
+
+#filtering out doublets
+```{r}
+nasal_seurat <- subset(nasal_seurat, subset = scDblFinder.class == "singlet")
+
+```
+
+#qc check for mitochondrial
+```{r}
+# Calculate the percentage of mitochondrial genes
+nasal_seurat$percent_mito <- PercentageFeatureSet(nasal_seurat, pattern = "^mt-", assay = "RNA")
+
+# View the first few entries of the 'percent_mito' column in the metadata
+head(nasal_seurat@meta.data$percent_mito)
+
+```
+
+```{r}
+# Visualize the mitochondrial gene percentage distribution across cells
+VlnPlot(nasal_seurat, features = "percent_mito", pt.size = 0.1)
+
+```
+
+
+```{r}
+# Calculate percent ribosomal genes for the nasal_seurat object
+nasal_seurat$percent_ribo <- PercentageFeatureSet(nasal_seurat, pattern = "^Rp[sl]", assay = "RNA")
+
+```
+
+
+```{r}
+# Plot ribosomal gene percentage distribution for the nasal_seurat object
+VlnPlot(nasal_seurat, features = "percent_ribo", pt.size = 0.1) +
+  ggtitle("Ribosomal Gene Percentage") +
+  scale_y_continuous(limits = c(0, 65))  
+
+```
+
+
+```{r}
+cc.genes <- cc.genes.updated.2019
+```
+
+
+```{r}
+
+cc.genes <- lapply(cc.genes, function(genes) {
+   gprofiler2::gorth(genes, 
+        target_organism = "mmusculus"   
+   )$ortholog_name
+})
+```
+
+```{r}
+head(cc.genes)
+```
+
+```{r}
+nasal_seurat <- NormalizeData(nasal_seurat)
+nasal_seurat <- CellCycleScoring(nasal_seurat,
+                                  s.features = cc.genes$s.genes,
+                                  g2m.features = cc.genes$g2m.genes,
+                                  set.ident = FALSE)
+
+```
+
+```{r}
+ggplot(nasal_seurat@meta.data, aes(x = Phase, fill = Phase)) +
+  geom_bar() +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  ggtitle(unique(nasal_seurat$orig.ident)) +
+  theme(legend.position = "none")
+```
+
+#regressing out cc score
+```{r}
+nasal_seurat <- SCTransform(nasal_seurat, 
+                             method = "glmGamPoi", 
+                             vars.to.regress = c("S.Score", "G2M.Score"), 
+                             verbose = FALSE)
+```
+
+
+```{r}
+# Check number of cells before QC
+ncell_before <- ncol(nasal_seurat)
+print(ncell_before)
+
+```
+
+
+
+```{r}
+# 1. Calculate QC cutoffs using median and MAD
+feature_cutoff <- median(nasal_seurat@meta.data$nFeature_SCT) - 3 * mad(nasal_seurat@meta.data$nFeature_SCT)
+feature_cutoff <- ifelse(feature_cutoff < 100, 100, feature_cutoff)
+
+mito_cutoff <- median(nasal_seurat@meta.data$percent_mito) + 3 * mad(nasal_seurat@meta.data$percent_mito)
+mito_cutoff <- ifelse(mito_cutoff > 10, 10, mito_cutoff)
+
+# Print the cutoffs
+qc.df <- data.frame(feature_cutoff = feature_cutoff,
+                    mito_cutoff = mito_cutoff)
+print(qc.df)
+
+# 2. Filter out poor-quality cells based on these thresholds
+nasal_seurat <- subset(nasal_seurat,
+                                subset = nFeature_SCT > feature_cutoff &
+                                         percent_mito < mito_cutoff)
+
+
+
+
+```
+
+```{r}
+print(nasal_seurat)
+```
+
+
+
+```{r}
+# Number of cells after QC filtering
+ncell_after <- ncol(nasal_seurat)
+print(ncell_after)
+
+```
+
+
+```{r}
+# Violin plot for percent mitochondrial genes
+VlnPlot(nasal_seurat, features = "percent_mito") + 
+  ggtitle("Percent Mitochondrial Genes")
+
+# Violin plot for number of features (genes) detected
+VlnPlot(nasal_seurat, features = "nFeature_RNA") + 
+  ggtitle("Number of Features (RNA)")
+```
+
+
+```{r}
+#normalising
+nasal_seurat <- SCTransform(nasal_seurat,
+                            method = "glmGamPoi",
+                            verbose = FALSE)
+```
+
+```{r}
+# Run PCA
+nasal_seurat <- RunPCA(nasal_seurat, verbose = FALSE)
+
+# Find neighbors using the first 50 PCs
+nasal_seurat <- FindNeighbors(nasal_seurat, dims = 1:50)
+
+# Find clusters with higher resolution (1.8)
+nasal_seurat <- FindClusters(nasal_seurat, resolution = 1.8)
+
+```
+
+
+
+```{r}
+# check cluster identities
+table(Idents(nasal_seurat))
+
+```
+
+```{r}
+# Violin plot for percent mitochondrial genes
+p1 <- VlnPlot(nasal_seurat, features = "percent_mito") +
+  ggtitle("Percent Mitochondrial Content")
+
+# Violin plot for number of features (genes) detected
+p2 <- VlnPlot(nasal_seurat, features = "nFeature_RNA") +
+  ggtitle("Number of Features (nFeature_RNA)")
+
+# Combine the two plots vertically
+p1 + p2 + plot_layout(ncol = 1)
+```
+
+
+```{r}
+# Identify clusters that do NOT meet the low-quality criteria
+clusters_to_keep <- nasal_seurat@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(
+    maxfeat = max(nFeature_RNA),
+    maxmito = max(percent_mito)
+  ) %>%
+  filter(maxfeat > 1000 | maxmito < 2.5) %>%
+  pull(seurat_clusters)
+
+# Subset Seurat object to keep only good clusters
+nasal_seurat <- subset(nasal_seurat, idents = clusters_to_keep)
+```
+
+
+```{r}
+# Plot for percent mitochondrial content
+p1 <- VlnPlot(nasal_seurat, features = "percent_mito") +
+  ggtitle("Percent Mitochondrial Content")
+
+# Plot for number of detected features (genes)
+p2 <- VlnPlot(nasal_seurat, features = "nFeature_RNA") +
+  ggtitle("Number of Features (nFeature_RNA)")
+
+# Combine vertically
+p1 + p2 + plot_layout(ncol = 1)
+```
+
+```{r}
+# Re-run neighbors and clustering
+nasal_seurat <- FindNeighbors(nasal_seurat, dims = 1:50)
+nasal_seurat <- FindClusters(nasal_seurat, resolution = 1.8)
+
+```
+
+```{r}
+# Identify clusters that pass QC thresholds
+clusters_to_keep2 <- nasal_seurat@meta.data %>%
+  group_by(seurat_clusters) %>%
+  summarise(
+    maxfeat = max(nFeature_RNA),
+    maxcount = max(nCount_RNA)
+  ) %>%
+  filter(maxfeat > 2000 | maxcount > 4000) %>%
+  pull(seurat_clusters)
+
+# Subset to keep only those clusters
+nasal_seurat <- subset(nasal_seurat, idents = clusters_to_keep2)
+```
+
+
+
+```{r}
+# Violin plot for nCount_RNA
+p1 <- VlnPlot(nasal_seurat, features = "nCount_RNA") +
+  ggtitle("nCount_RNA Distribution")
+
+# Violin plot for nFeature_RNA
+p2 <- VlnPlot(nasal_seurat, features = "nFeature_RNA") +
+  ggtitle("nFeature_RNA Distribution")
+
+# Combine plots vertically
+p1 + p2 + plot_layout(ncol = 1)
+```
+
+#Final SCT nasal_seurat
+```{r}
+nasal_seurat <- SCTransform(nasal_seurat,
+                            method = "glmGamPoi",
+                            verbose = FALSE)
+```
+
+#saving rds file
+```{r}
+#saveRDS(nasal_seurat, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/FinalSCT_nasal_seurat.rds")
+```
+
+
+```{r}
+### from here load in this rds and continue
+nasal_seurat <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/FinalSCT_nasal_seurat.rds")
+```
+
+
+```{r}
+# Run dimensionality reduction on nasal_seurat
+nasal_seurat <- RunPCA(nasal_seurat)
+nasal_seurat <- RunTSNE(nasal_seurat, dims = 1:50)
+nasal_seurat <- RunUMAP(nasal_seurat, dims = 1:50)
+
+```
+
+```{r}
+DimPlot(nasal_seurat, reduction = "umap")
+
+```
+
+```{r}
+DimPlot(nasal_seurat, reduction = "tsne")
+
+```
+
+
+```{r}
+# Set range of clustering resolutions
+res.range <- seq(0.4, 3, 0.2)
+
+# Set default assay and find neighbors
+DefaultAssay(nasal_seurat) <- "SCT"
+nasal_seurat <- FindNeighbors(nasal_seurat, dims = 1:50)
+
+# Loop through resolutions and cluster
+for (res in res.range) {
+  nasal_seurat <- FindClusters(nasal_seurat, resolution = res)
+}
+
+```
+
+```{r}
+clustree::clustree(nasal_seurat, prefix = "SCT_snn_res.")
+```
+
+
+```{r}
+
+
+wss.out <- do.call(bind_rows, lapply(res.range, function(k) {
+  
+  # Get cluster IDs for resolution k
+  cluster_col <- paste0("SCT_snn_res.", k)
+  
+  # Calculate centroids for each cluster in PCA space
+  centroids <- aggregate(Embeddings(nasal_seurat, reduction = "pca"),
+                         by = list(cluster = nasal_seurat[[cluster_col]][,1]),
+                         FUN = mean)
+  rownames(centroids) <- centroids$cluster
+  centroids <- centroids[, -1]
+  
+  # Calculate squared differences between each cell and its cluster centroid
+  diffsq <- (Embeddings(nasal_seurat, reduction = "pca") - 
+               centroids[nasal_seurat@meta.data[[cluster_col]], ])^2
+  
+  # Calculate variance (sd squared) for each PC
+  sdsq <- colSds(Embeddings(nasal_seurat, reduction = "pca"))^2
+  
+  # Weight differences by variance
+  wdiff <- diffsq / sdsq
+  
+  # Calculate weighted sum of squares
+  wss <- sum(sqrt(rowSums(wdiff)))
+  
+  data.frame(clust = k, wss = wss)
+}))
+
+# Add sample ID
+wss.out$id <- nasal_seurat$orig.ident[1]
+
+wss.out
+
+```
+
+```{r}
+wss.out %>%
+  mutate(scaled_wss = scale(wss)) %>%
+  ggplot(aes(x = clust, y = scaled_wss)) +
+  geom_line(color = "blue") +
+  geom_point(color = "blue") +
+  labs(title = paste("WSS vs Clustering Resolution for", wss.out$id[1]),
+       x = "Resolution",
+       y = "Scaled Weighted Sum of Squares") +
+  theme_minimal()
+```
+
+
+```{r}
+
+
+# Define to test
+resolutions <- c(0.8, 1.2, 1.6, 2.0, 2.4, 2.6)
+
+# Run clustering for each resolution and store cluster identities in metadata
+for (res in resolutions) {
+  nasal_seurat <- FindClusters(nasal_seurat, resolution = res, verbose = FALSE)
+  # creates metadata columns like "SCT_snn_res.1.2", etc.
+}
+
+# Plot UMAPs for each resolution side by side
+plots <- lapply(resolutions, function(res) {
+  cluster_col <- paste0("SCT_snn_res.", res)
+  Idents(nasal_seurat) <- nasal_seurat[[cluster_col]][,1]  # extract vector properly
+  DimPlot(nasal_seurat, reduction = "umap", label = TRUE) + 
+    ggtitle(paste("Resolution", res))
+})
+
+# Combine plots
+wrap_plots(plots, ncol = 2)
+
+```
+
+```{r}
+plots <- lapply(resolutions, function(res) {
+  cluster_col <- paste0("SCT_snn_res.", res)
+  Idents(nasal_seurat) <- nasal_seurat@meta.data[[cluster_col]]
+  DimPlot(nasal_seurat, reduction = "umap", label = TRUE) + 
+    ggtitle(paste("Resolution", res))
+})
+
+```
+
+
+
+```{r}
+print(plots[[1]]) 
+print(plots[[2]])  
+print(plots[[3]]) 
+print(plots[[4]]) 
+print(plots[[5]]) 
+
+```
+
+
+```{r}
+## clustering for real
+
+res <- 1.2
+nasal_seurat <- FindNeighbors(nasal_seurat, verbose = F)
+nasal_seurat <- FindClusters(nasal_seurat, resolution = res, verbose = F)
+
+```
+
+
+```{r}
+Idents(nasal_seurat) <- "SCT_snn_res.1.2"
+FeaturePlot(nasal_seurat, features = c("Syn1", "Tubb3", "Gap43"))
+
+```
+
+
+
+```{r}
+table(nasal_seurat$seurat_clusters)
+```
+
+```{r}
+DotPlot(nasal_seurat, features = c("Syn1" ), split.by = NULL)
+```
+
+
+#saving rds file
+```{r}
+#saveRDS(nasal_seurat, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/FinalSCT_nasal_seurat.rds")
+```
+
+
+```{r}
+### from here load in this rds and continue::::::::
+nasal_seurat <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/FinalSCT_nasal_seurat.rds")
+```
+
+
+
+```{r}
+#importing mouse genes
+mouse_genes = read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/Dishalas_Filtered_OSN_Genes.csv")
+```
+
+
+```{r}
+#importing human genes
+human_genes = read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/Filtered_human_genes.csv")
+```
+
+
+```{r}
+# Filter the data for mOSN (mature OSN) cluster
+mouse_mOSN_info = mouse_genes[mouse_genes$cluster == "mOSN", ]
+
+# Filter the data for iOSN (immature OSN) cluster
+mouse_iOSN_info = mouse_genes[mouse_genes$cluster == "iOSN", ]
+```
+
+
+```{r}
+human_gene_lists = split(human_genes$gene, human_genes$cluster)
+
+# Separate into iOSN and mOSN genes
+human_mOSN_genes = human_genes[human_genes$cluster =="Mature Neurons", ]
+human_iOSN_genes = human_genes[human_genes$cluster =="Immature Neurons", ]
+
+
+# Convert human mOSN genes to mouse orthologs
+converted_human_mOSN_genes = gprofiler2::gorth(
+  human_mOSN_genes$gene, 
+  source_organism = "hsapiens", 
+  target_organism = "mmusculus"
+)
+
+# Convert human iOSN genes to mouse orthologs
+converted_human_iOSN_genes = gprofiler2::gorth(
+  human_iOSN_genes$gene, 
+  source_organism = "hsapiens", 
+  target_organism = "mmusculus"
+) 
+```
+
+
+
+```{r}
+# Extract only necessary columns
+converted_human_mOSN_df <- converted_human_mOSN_genes[, c("input", "ortholog_name")]
+converted_human_iOSN_df <- converted_human_iOSN_genes[, c("input", "ortholog_name")]
+
+# Renaming the column nmes
+colnames(converted_human_mOSN_df) <- c("gene", "mouse_gene")
+colnames(converted_human_iOSN_df) <- c("gene", "mouse_gene")
+
+# Merge back with original data to preserve other columns like p-value, avg_logFC and so on
+human_mOSN_info <- merge(human_mOSN_genes, converted_human_mOSN_df, 
+                         by = "gene", all.x = TRUE)
+
+human_iOSN_info <- merge(human_iOSN_genes, converted_human_iOSN_df, 
+                         by = "gene", all.x = TRUE)
+
+# Add source column
+human_mOSN_info$source <- "converted_human_mOSN"
+human_iOSN_info$source <- "converted_human_iOSN"
+
+# View results
+head(human_mOSN_info)
+head(human_iOSN_info)
+
+
+
+
+
+```
+
+
+
+```{r}
+
+# Standardisinge column names by ensuring all data frames have the same structure
+human_iOSN_info$species <- "Human"
+human_mOSN_info$species <- "Human"
+mouse_mOSN_info$species <- "Mouse"
+mouse_iOSN_info$species <- "Mouse"
+
+# Add missing columns (source in mouse dataset)
+mouse_mOSN_info$source <- "converted_mouse_mOSN"
+mouse_iOSN_info$source <- "converted_mouse_iOSN"
+
+# Making sure all have the same column order
+all_columns <- c("gene", "p_val", "avg_logFC", "pct.1", "pct.2", "p_val_adj", "cluster", "mouse_gene", "source", "species")
+
+# Add missing columns to mouse data frames
+mouse_mOSN_info$mouse_gene <- mouse_mOSN_info$gene
+mouse_iOSN_info$mouse_gene <- mouse_iOSN_info$gene
+
+# Bind all data frames
+combined_df <- bind_rows(
+  dplyr::select(mouse_mOSN_info, all_of(all_columns)),  
+  dplyr::select(mouse_iOSN_info, all_of(all_columns)),
+  dplyr::select(human_iOSN_info, all_of(all_columns)),  
+  dplyr::select(human_mOSN_info, all_of(all_columns))
+)
+
+# View the combined data frame
+head(combined_df)
+
+
+
+```
+
+
+```{r}
+combined_df %>%
+  distinct(mouse_gene, .keep_all = T) %>%   ##this line gets the distinct genes, gets rid of human duplicate
+  pull(cluster) %>% unique()
+```
+
+```{r}
+# Recode human clusters to match mouse clusters
+combined_df <- combined_df %>%
+  mutate(cluster = case_when(
+    cluster == "Immature Neurons" ~ "iOSN",  # Recode "Immature Neurons" to "iOSN"
+    cluster == "Mature Neurons" ~ "mOSN",    # Recode "Mature Neurons" to "mOSN"
+    TRUE ~ cluster                          # Keep other clusters unchanged
+  ))
+```
+
+
+```{r}
+combined_df %>%
+  group_by(cluster) %>%
+  slice_max(n=100, order_by = avg_logFC) %>%  ##getting the top 100 for mOSN and iOSN each according to avg_logFC
+  group_by(species, cluster) %>%
+  tally()
+```
+
+
+#extracting iOSN and mOSN genes separately
+```{r}
+top_mOSN_genes <- combined_df %>%
+  filter(cluster == "mOSN") %>%
+  slice_max(n = 100, order_by = avg_logFC) %>%
+  pull(mouse_gene)
+
+top_iOSN_genes <- combined_df %>%
+  filter(cluster == "iOSN") %>%
+  slice_max(n = 100, order_by = avg_logFC) %>%
+  pull(mouse_gene)
+
+
+
+```
+
+
+
+
+```{r}
+# Store in a list for AddModuleScore
+top_osn_gene_sets <- list("iOSN" = top_iOSN_genes, "mOSN" = top_mOSN_genes)
+```
+
+
+
+
+#doing add module score
+```{r}
+nasal_seurat <- AddModuleScore(object = nasal_seurat,
+    features = top_osn_gene_sets,  # List of gene sets
+    name = "TopOSN_Score",  
+    ctrl = 100, 
+    assay = "RNA"  )
+```
+
+#score 1 corresponds to immature, score 2 corresponds to mature
+
+
+
+```{r}
+FeaturePlot(
+  nasal_seurat,
+  features = c("TopOSN_Score1","TopOSN_Score2") 
+  
+)
+```
+
+in no occlusion dataset the immature (score1) and mature (score2) cells separate cleanly, but in nasal occlusion dataset they overlap more, likely reflects a biological effect of the occlusion. It might be causing:
+
+Delayed or disrupted OSN maturation
+
+A more continuous or mixed state between immature and mature OSNs
+
+A shift in gene expression dynamics, blurring the typical marker distinctions
+
+
+
+
+
+
+```{r}
+nasal_seurat@meta.data
+```
+
+
+
+```{r}
+
+
+# Set cluster identities to "SCT_snn_res.1.2"
+Idents(nasal_seurat) <- nasal_seurat$SCT_snn_res.1.2
+
+# Feature plots for TopOSN_Score1 and TopOSN_Score2 
+FeaturePlot(nasal_seurat, 
+            features = "TopOSN_Score1", 
+            label = TRUE, 
+            min.cutoff = 0)
+
+FeaturePlot(nasal_seurat, 
+            features = "TopOSN_Score2", 
+            label = TRUE, 
+            min.cutoff = 0)
+
+# Summarise TopOSN scores per cluster
+nasal_seurat@meta.data %>%
+  group_by(SCT_snn_res.1.2) %>%
+  summarise(
+    TopOSN_Score1_avg = mean(TopOSN_Score1, na.rm = TRUE),
+    TopOSN_Score1_exp_perc = sum(TopOSN_Score1 > 0.1, na.rm = TRUE) / n(),
+    TopOSN_Score2_avg = mean(TopOSN_Score2, na.rm = TRUE),
+    TopOSN_Score2_exp_perc = sum(TopOSN_Score2 > 0.1, na.rm = TRUE) / n()
+  )
+
+
+
+
+
+```
+
+
+```{r}
+selected_clusters <- c(1, 4, 18, 21, 10, 11, 6, 25)
+
+nasal_seurat_selected <- subset(nasal_seurat, idents = selected_clusters)
+
+```
+
+
+
+no need to run harmony or cca or rPCA because data is from one single experiment.
+
+```{r}
+ElbowPlot(nasal_seurat, ndims = 50)
+```
+
+
+###### nasal_seurat has all the clusters and nasal_seurat_selected has only the selected clusters. so you have two seurat objects at the moment.
+
+
+
+
+```{r}
+nasal_seurat_selected <- RunPCA(nasal_seurat_selected, verbose = FALSE)
+
+# Find neighbors based on PCA
+nasal_seurat_selected <- FindNeighbors(nasal_seurat_selected, dims = 1:50)
+
+# Find clusters 
+nasal_seurat_selected <- FindClusters(nasal_seurat_selected, resolution = 1.2)
+
+# Visualise clusters using UMAP
+nasal_seurat_selected <- RunUMAP(nasal_seurat_selected, dims = 1:50)
+DimPlot(nasal_seurat_selected, reduction = "umap", label = TRUE, group.by = "orig.ident")
+
+```
+
+#OSN scores
+```{r}
+FeaturePlot(nasal_seurat_selected, features = "TopOSN_Score1", min.cutoff = 0, label = TRUE)  # iOSN
+FeaturePlot(nasal_seurat_selected, features = "TopOSN_Score2", min.cutoff = 0, label = TRUE)  # mOSN
+
+```
+
+
+# osn_type to give a harder cutoff, more distinct classification
+```{r}
+nasal_seurat_selected$OSN_type <- ifelse(nasal_seurat_selected$TopOSN_Score1 > 
+                                          nasal_seurat_selected$TopOSN_Score2, 
+                                          "iOSN", "mOSN")
+
+DimPlot(nasal_seurat_selected, reduction = "umap", group.by = "OSN_type", label = TRUE)
+
+```
+
+
+#saving rds file
+```{r}
+#saveRDS(nasal_seurat_selected, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/nasal_seurat_selected.rds")
+```
+
+
+```{r}
+### from here load in this rds and continue
+nasal_seurat_selected <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/nasal_seurat_selected.rds")
+```
+
+
+
+# just checking for this gene
+```{r}
+FeaturePlot(
+  nasal_seurat_selected,
+  features = c("Tubb3"),
+  label = TRUE
+  
+)
+```
+
+```{r}
+FeaturePlot(
+  nasal_seurat_selected,
+  features = c("TopOSN_Score1", "TopOSN_Score2"),
+  label = TRUE
+  
+)
+
+```
+
+```{r}
+DimPlot(
+  nasal_seurat_selected,
+  group.by = "seurat_clusters",
+  label = TRUE
+)
+
+```
+
+
+```{r}
+nasal_seurat_selected <- subset(nasal_seurat_selected, idents = c("0", "1", "2", "3", "4", "5", "6", "7", "9", "10"))
+
+```
+
+```{r}
+saveRDS(nasal_seurat_selected, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/nasal_seurat_selected.rds")
+```
+
+
+
+
+#going to use the csv file that has the list of genes sorted into categories.
+
+```{r}
+AIS_categories <- read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/New_AIS_cat_prop.csv")
+```
+
+
+```{r}
+tail(AIS_categories)
+```
+
+
+
+```{r}
+AIS_categories <- AIS_categories %>%
+  filter(!grepl("look above", AIS_specific, ignore.case = TRUE))
+
+```
+
+```{r}
+AIS_categories <- AIS_categories %>%
+  filter(!grepl("look below", AIS_specific, ignore.case = TRUE))
+```
+
+
+```{r}
+tail(AIS_categories)
+```
+
+
+```{r}
+AIS_categories_df <- as.data.frame(AIS_categories)
+```
+
+
+
+```{r}
+AIS_categories_df <- AIS_categories_df[, -1]
+
+```
+
+
+```{r}
+AIS_categories_df[17, 1] <- "Kcnb2"
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# getting the new list of AIS genes
+```{r}
+new_AIS_genes_csv <- read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/New_AIS_cat_prop.csv")
+```
+
+```{r}
+tail(new_AIS_genes_csv)
+```
+
+```{r}
+new_AIS_genes_csv <- new_AIS_genes_csv %>%
+  filter(!grepl("look above", AIS_specific, ignore.case = TRUE))
+
+```
+
+```{r}
+new_AIS_genes_csv <- new_AIS_genes_csv %>%
+  filter(!grepl("look below", AIS_specific, ignore.case = TRUE))
+```
+
+
+```{r}
+new_AIS_genes_csv_df <- as.data.frame(new_AIS_genes_csv)
+```
+
+
+```{r}
+keeps <- c("Mouse_name", "AIS_specific", "Function", "Category")
+```
+
+
+```{r}
+new_AIS_genes_csv_df <- new_AIS_genes_csv_df[keeps]
+```
+
+
+
+
+```{r}
+tail(new_AIS_genes_csv_df)
+```
+
+```{r}
+new_AIS_genes_csv_df <- new_AIS_genes_csv_df[new_AIS_genes_csv_df$AIS_specific %in% c("yes", "maybe", "Yes", "Maybe"), ]
+
+```
+
+```{r}
+new_AIS_genes <- as.character(new_AIS_genes_csv_df$Mouse_name)
+```
+
+```{r}
+new_AIS_genes
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+negative log10 of the p-values to better highlight statistical significance.
+higher significance (lower p-values) as red and lower significance as blue in the gradient.
+
+
+## doing differential expression again but with obj_harmony and nasal_selected_clusters
+
+
+```{r}
+# loading in obj_harmony
+
+obj_harmony <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/obj_harmony.rds")
+
+```
+
+
+```{r}
+### from here load in this rds and continue
+nasal_seurat_selected <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/nasal_seurat_selected.rds")
+```
+
+```{r}
+#making a copy of obj_harmony for merging
+
+obj_harmony_2 <- obj_harmony
+nasal_seurat_selected_2 <- nasal_seurat_selected
+```
+
+
+
+```{r}
+obj_harmony_2$status <- "wildtype"
+nasal_seurat_selected_2$status <- "occlusion"
+
+```
+
+
+
+
+
+
+
+```{r}
+DefaultAssay(nasal_seurat_selected_2) <- "RNA"
+DefaultAssay(obj_harmony_2) <- "RNA"
+
+nasal_seurat_selected_2[["SCT"]] <- NULL
+obj_harmony_2[["SCT"]] <- NULL
+
+```
+
+
+```{r}
+shared_genes <- intersect(rownames(nasal_seurat_selected_2), rownames(obj_harmony_2))
+length(shared_genes)  # should be > 0
+
+```
+
+
+
+```{r}
+nasal_seurat_selected_2 <- nasal_seurat_selected_2[shared_genes, ]
+obj_harmony_2 <- obj_harmony_2[shared_genes, ]
+
+```
+
+
+
+
+
+
+
+```{r}
+#merging the seurat objects
+
+harmony_nasal <- merge(x = obj_harmony_2, y = list(nasal_seurat_selected_2))
+```
+
+
+```{r}
+head(harmony_nasal)
+tail(harmony_nasal)
+```
+
+
+```{r}
+# Rerun SCTransform  
+harmony_nasal <- SCTransform(harmony_nasal, verbose = FALSE)
+
+#Run PCA and UMAP for visualization
+harmony_nasal <- RunPCA(harmony_nasal, verbose = FALSE)
+harmony_nasal <- RunUMAP(harmony_nasal, dims = 1:30)
+
+
+```
+
+
+```{r}
+#saveRDS(harmony_nasal, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/harmony_nasal.rds")
+
+#continue from here
+harmony_nasal <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/harmony_nasal.rds")
+```
+
+
+```{r}
+# Plot UMAP to check if immature and mature neurons separate well
+DimPlot(harmony_nasal, group.by = "status", label = TRUE) + NoLegend()
+```
+
+```{r}
+# Plot UMAP to check if immature and mature neurons separate well
+DimPlot(harmony_nasal, group.by = "status", label = TRUE) + NoLegend()
+```
+
+
+
+
+```{r}
+# Plot PCA by status 
+DimPlot(harmony_nasal, reduction = "pca", group.by = "status", label = TRUE) + NoLegend()
+
+```
+
+```{r}
+FeaturePlot(harmony_nasal, features = c("TopOSN_Score1", "TopOSN_Score2"))
+
+```
+
+
+
+
+
+#Differential Expression Between wildtype and occlusion
+
+```{r}
+# Set SCT as default assay
+DefaultAssay(harmony_nasal) <- "SCT"
+
+# Prep for DE using SCT assay
+harmony_nasal <- PrepSCTFindMarkers(harmony_nasal)
+
+# Set the identity class
+Idents(harmony_nasal) <- "status"
+
+# Run DE between occlusion and wildtype
+status.de.markers <- FindMarkers(harmony_nasal,
+                                 ident.1 = "occlusion",
+                                 ident.2 = "wildtype",
+                                 logfc.threshold = 0.25,
+                                 min.pct = 0.1,
+                                 only.pos = FALSE,
+                                 assay = "SCT")
+
+# View results
+head(status.de.markers)
+```
+
+```{r}
+saveRDS(status.de.markers, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/status.de.markers.rds")
+```
+
+
+
+data frame containing genes that are differentially expressed between the two status groups (occlusion vs wildtype)
+
+p_val: raw p-value (unadjusted)
+
+avg_log2FC: average log<sub>2</sub>-fold change between the two groups
+Positive = up in occlusion
+Negative = up in wildtype
+
+
+pct.1: % of cells expressing the gene in occlusion
+
+pct.2: % of cells expressing the gene in wildtype
+
+p_val_adj: p-value adjusted for multiple testing (Benjamini-Hochberg)
+
+
+```{r}
+#Defining the significance thresholds
+pval_threshold <- 0.05
+logfc_threshold <- 0.5
+
+# Subset dataframe for significant genes (adjusted p-value and log fold change)
+significant_OSN_genes_df <- status.de.markers[
+  status.de.markers$p_val_adj < pval_threshold & 
+  abs(status.de.markers$avg_log2FC) > logfc_threshold, 
+]
+
+# View the first few significant genes
+head(significant_OSN_genes_df)
+
+```
+
+```{r}
+saveRDS(significant_OSN_genes_df, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/significant_OSN_genes_df.rds")
+```
+
+
+
+
+
+
+
+
+## violin plots
+```{r}
+# Top 10 genes by adjusted p-value
+top_10_genes <- rownames(head(status.de.markers[order(status.de.markers$p_val_adj), ], 10))
+
+# Violin plots for these genes
+VlnPlot(harmony_nasal, features = top_10_genes, group.by = "status", pt.size = 0.9)
+
+```
+
+
+```{r}
+# Create individual violin plots for each 
+vplots <- lapply(top_10_genes, function(gene) {
+  VlnPlot(harmony_nasal, features = gene, group.by = "status", pt.size = 0.9) +
+    ggtitle(gene)  
+})
+
+
+vplots[[1]]
+vplots[[2]]
+vplots[[3]]
+vplots[[4]]
+vplots[[5]]
+vplots[[6]]
+vplots[[7]]
+vplots[[8]]
+vplots[[9]]
+vplots[[10]]
+
+```
+
+
+
+
+
+
+```{r}
+
+FeaturePlot(harmony_nasal, features = top_10_genes, reduction = "umap")
+
+```
+
+
+
+```{r}
+# Prepare data for volcano plot
+volcano_data <- status.de.markers
+volcano_data$gene <- rownames(volcano_data)
+
+ggplot(volcano_data, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(alpha = 0.5) +
+  theme_minimal() +
+  xlab("Average Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-value") +
+  geom_vline(xintercept = c(-0.5, 0.5), col = "red", linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), col = "red", linetype = "dashed") +
+  geom_text(data = subset(volcano_data, p_val_adj < 0.05 & abs(avg_log2FC) > 1),
+            aes(label = gene), vjust = 1, hjust = 1, size = 3)
+
+```
+
+
+
+
+
+
+
+#Perform DE analysis within the same cell type across conditions
+
+
+OSN_type had na values for wildtype, not annotated, so here im annotating them (iosn and mosn_)
+```{r}
+na_idx <- which(is.na(harmony_nasal$OSN_type) & harmony_nasal$status == "wildtype")
+
+harmony_nasal$OSN_type[na_idx] <- ifelse(
+  harmony_nasal$TopOSN_Score1[na_idx] > harmony_nasal$TopOSN_Score2[na_idx],
+  "iOSN",
+  ifelse(
+    harmony_nasal$TopOSN_Score2[na_idx] > harmony_nasal$TopOSN_Score1[na_idx],
+    "mOSN",
+    "Undefined"
+  )
+)
+
+```
+
+
+```{r}
+harmony_nasal$celltype_status <- paste(harmony_nasal$OSN_type, harmony_nasal$status, sep = "_")
+Idents(harmony_nasal) <- "celltype_status"
+
+```
+
+
+```{r}
+table(harmony_nasal$celltype_status)
+
+```
+
+```{r}
+# Make sure SCT is the default assay
+DefaultAssay(harmony_nasal) <- "SCT"
+
+# Prepare SCT for DE testing
+harmony_nasal <- PrepSCTFindMarkers(harmony_nasal)
+```
+
+
+#Run DE for iOSN (wildtype vs occlusion):
+```{r}
+iosn.de <- FindMarkers(harmony_nasal,
+                       ident.1 = "iOSN_occlusion",
+                       ident.2 = "iOSN_wildtype",
+                       logfc.threshold = 0.25,
+                       min.pct = 0.1,
+                       only.pos = FALSE)
+head(iosn.de)
+
+```
+
+Xist-Extremely upregulated in occlusion: avg_log2FC = 11.7. Expressed in 86% of occlusion cells, 0% of wildtype. 
+
+Rpl10-Downregulated in occlusion: avg_log2FC = -2.2. 60.8% vs 94.5% expression (occlusion vs wildtype)
+Suggests lower ribosomal activity in iOSNs under occlusion
+
+AC160336.1- upregulated: avg_log2FC = 7.99, expressed in 61% vs 0.5%
+Could be a novel or less-characterized gene responsive to the condition
+
+
+
+
+
+
+# Run DE for mOSN (wildtype vs occlusion):
+```{r}
+mosn.de <- FindMarkers(harmony_nasal,
+                       ident.1 = "mOSN_occlusion",
+                       ident.2 = "mOSN_wildtype",
+                       logfc.threshold = 0.25,
+                       min.pct = 0.1,
+                       only.pos = FALSE)
+head(mosn.de)
+
+```
+
+```{r}
+AIS_categories <- read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/New_AIS_cat_prop.csv")
+ AIS_categories <- AIS_categories %>%
+   filter(!grepl("look above", AIS_specific, ignore.case = TRUE))
+ 
+ AIS_categories <- AIS_categories %>%
+   filter(!grepl("look below", AIS_specific, ignore.case = TRUE))
+ AIS_categories_df <- as.data.frame(AIS_categories)
+ AIS_categories_df <- AIS_categories_df[, -1]
+ 
+AIS_categories_df[17, 1] <- "Kcnb2"
+```
+
+```{r}
+# Extract gene symbols as a vector
+AIS_genes_violinlist <- AIS_categories_df$Mouse_name
+```
+
+
+
+```{r}
+head(AIS_categories_df)
+```
+
+
+## for global
+
+
+```{r}
+# Keep only DE genes that are in the AIS list
+AIS_sig_genes_df <- significant_OSN_genes_df[
+  rownames(significant_OSN_genes_df) %in% AIS_genes_violinlist, 
+]
+
+```
+
+
+```{r}
+# Get top 10 by absolute log2FC
+top10_AIS_genes <- AIS_sig_genes_df %>%
+  dplyr::arrange(desc(abs(avg_log2FC))) %>%
+  head(10)
+
+# Gene names to plot
+top10_gene_names <- rownames(top10_AIS_genes)
+
+```
+
+```{r}
+top10_gene_names[!top10_gene_names %in% rownames(harmony_nasal[["SCT"]]@data)]
+
+```
+
+
+
+
+
+
+```{r}
+VlnPlot(
+  harmony_nasal,
+  features = top10_gene_names,     # Use 'status' to group (e.g., wildtype vs occlusion)
+  split.by = "status",     # Split violins by status within each gene
+  pt.size = 0.1,
+  ncol = 2,
+  assay = "SCT"            # Or use "RNA" depending on what you normalized/used
+)
+
+```
+
+```{r}
+# Relevel the status factor to switch order
+harmony_nasal$status <- factor(harmony_nasal$status, levels = c("occlusion", "wildtype"))
+
+```
+
+
+
+
+
+
+```{r}
+
+
+# Set the identity to status so x-axis groups by status
+Idents(harmony_nasal) <- "status"
+
+# Now loop and plot with proper grouping
+for (gene in top10_gene_names) {
+  print(
+    VlnPlot(
+      object = harmony_nasal,
+      features = gene,
+      pt.size = 0.1,
+      assay = "SCT"
+    ) + ggtitle(gene)
+  )
+}
+
+
+```
+
+
+
+## results from most of the code below will not be used
+
+
+
+
+
+
+
+
+
+
+
+
+## subset the three data frames for the ais genes.
+
+
+
+## for iosn
+```{r}
+iosn.de$Gene <- rownames(iosn.de)
+
+# Filter to only AIS genes
+ais_genes_list <- AIS_categories_df$Mouse_name
+iosn.de.ais <- iosn.de[iosn.de$Gene %in% ais_genes_list, ]
+
+#  Merge DE results with AIS metadata
+annotated_iosn_ais_de <- merge(
+  iosn.de.ais,
+  AIS_categories_df,
+  by.x = "Gene",
+  by.y = "Mouse_name"
+)
+
+head(annotated_iosn_ais_de)
+```
+
+
+################## new one 
+
+```{r}
+
+
+# Subset upregulated in occlusion (logFC > 0)
+up_occlusion_genes <- annotated_iosn_ais_de %>%
+  filter(avg_log2FC > 0.25) %>%
+  pull(Gene)
+
+# Subset upregulated in wildtype (logFC < 0)
+up_wildtype_genes <- annotated_iosn_ais_de %>%
+  filter(avg_log2FC < -0.25) %>%
+  pull(Gene)
+
+# Background genes = all genes tested
+background_genes <- rownames(iosn.de)
+
+# Run enrichment
+ego_occlusion <- enrichGO(
+  gene          = up_occlusion_genes,
+  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.1,
+  qvalueCutoff  = 0.1
+)
+
+ego_wildtype <- enrichGO(
+  gene          = up_wildtype_genes,
+  universe      = background_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.1,
+  qvalueCutoff  = 0.1
+)
+
+
+```
+
+
+```{r}
+# Convert results to data frames
+ego_occlusion_df <- as.data.frame(ego_occlusion)
+ego_wildtype_df <- as.data.frame(ego_wildtype)
+
+# View
+head(ego_occlusion_df)
+head(ego_wildtype_df)
+
+```
+
+```{r}
+ego_occlusion_df$Group <- "Occlusion"
+ego_wildtype_df$Group <- "Wildtype"
+
+combined_df <- rbind(ego_occlusion_df, ego_wildtype_df)
+
+# Select top 10 from each group
+top_combined <- combined_df %>%
+  group_by(Group) %>%
+  slice_max(order_by = Count, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(top_combined, aes(x = reorder(Description, Count), y = Count, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Top GO Terms by Condition", x = "GO Term", y = "Gene Count") +
+  theme_minimal()
+
+```
+
+```{r}
+# Top 10 enriched GO terms 
+top_terms <- ego_occlusion_df[1:10, ]
+
+ggplot(top_terms, aes(x = reorder(Description, p.adjust), y = p.adjust, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for iOSNs (Occlusion)",
+    x = "GO Term",
+    y = "p.adjust",
+    fill = "p.adjust"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+# Top 10 enriched GO terms 
+top_terms <- ego_occlusion_df[1:10, ]
+
+ggplot(top_terms, aes(x = reorder(Description, pvalue), y = pvalue, fill = pvalue)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for iOSNs (Occlusion)",
+    x = "GO Term",
+    y = "pvalue",
+    fill = "pvalue"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+# Top 10 enriched GO terms 
+top_terms <- ego_occlusion_df[1:10, ]
+
+ggplot(top_terms, aes(x = reorder(Description, FoldEnrichment), y = pvalue, fill = FoldEnrichment)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for iOSNs (Occlusion)",
+    x = "GO Term",
+    y = "FoldEnrichment",
+    fill = "FoldEnrichment"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Top 10 enriched GO terms (adjust as needed)
+top_terms <- ego_wildtype_df[1:10, ]
+
+ggplot(top_terms, aes(x = reorder(Description, p.adjust), y = p.adjust, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for iOSNs (Wildtype)",
+    x = "GO Term",
+    y = "p.adjust",
+    fill = "p.adjust"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# Top 10 enriched GO terms (adjust as needed)
+top_terms <- ego_wildtype_df[1:10, ]
+
+ggplot(top_terms, aes(x = reorder(Description, pvalue), y = pvalue, fill = pvalue)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for iOSNs (Wildtype)",
+    x = "GO Term",
+    y = "pvalue",
+    fill = "pvalue"
+  ) +
+  theme_minimal()
+
+```
+#### you stopped here
+```{r}
+# Top 10 enriched GO terms 
+top_terms <- ego_wildtype_df[1:10, ]
+
+ggplot(top_terms, aes(x = reorder(Description, FoldEnrichment), y = FoldEnrichment, fill = FoldEnrichment)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for iOSNs (Wildtype)",
+    x = "GO Term",
+    y = "FoldEnrichment",
+    fill = "FoldEnrichment"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+
+
+# Extract the gene list 
+gene_list <- annotated_iosn_ais_de$Gene
+
+# Define background/universe genes (all genes tested in iosn.de)
+background_genes_i <- rownames(iosn.de)  # 
+
+# Run GO enrichment
+ego_ais_i <- enrichGO(
+  gene          = gene_list,
+  universe      = background_genes_i,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "ALL",          # or "BP", "MF", "CC"
+  pAdjustMethod = "BH"
+  #pvalueCutoff  = 0.01,
+ # qvalueCutoff  = 0.05
+)
+
+# Check results
+head(ego_ais_i)
+
+```
+
+
+
+```{r}
+ego_df <- as.data.frame(ego_ais_i)
+
+ggplot(ego_df[1:10, ], aes(x = reorder(Description, -Count), y = Count, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "red", high = "blue") +
+  labs(title = "Top 10 Enriched GO Terms", x = "GO Term", y = "Gene Count") +
+  theme_minimal()
+
+```
+
+
+
+
+
+## for mosn
+```{r}
+mosn.de$Gene <- rownames(mosn.de)
+
+# Filter to only AIS genes
+#ais_genes_list <- AIS_categories_df$Mouse_name
+mosn.de.ais <- mosn.de[mosn.de$Gene %in% ais_genes_list, ]
+
+#  Merge DE results with AIS metadata
+annotated_mosn_ais_de <- merge(
+  mosn.de.ais,
+  AIS_categories_df,
+  by.x = "Gene",
+  by.y = "Mouse_name"
+)
+
+head(annotated_mosn_ais_de)
+```
+
+
+
+
+
+#######################################################################################new 
+
+
+
+```{r}
+
+
+# Subset upregulated in occlusion (logFC > 0)
+up_occlusion_genes_m <- annotated_mosn_ais_de %>%
+  filter(avg_log2FC > 0.25) %>%
+  pull(Gene)
+
+# Subset upregulated in wildtype (logFC < 0)
+up_wildtype_genes_m <- annotated_mosn_ais_de %>%
+  filter(avg_log2FC < -0.25) %>%
+  pull(Gene)
+
+# Background genes = all genes tested
+background_genes_m <- rownames(mosn.de)
+
+# Run enrichment
+ego_occlusion_m <- enrichGO(
+  gene          = up_occlusion_genes_m,
+  universe      = background_genes_m,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.1,
+  qvalueCutoff  = 0.1
+)
+
+ego_wildtype_m <- enrichGO(
+  gene          = up_wildtype_genes_m,
+  universe      = background_genes_m,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.1,
+  qvalueCutoff  = 0.1
+)
+
+
+```
+
+
+```{r}
+# Convert results to data frames
+ego_occlusion_df_m <- as.data.frame(ego_occlusion_m)
+ego_wildtype_df_m <- as.data.frame(ego_wildtype_m)
+
+# View
+head(ego_occlusion_df_m)
+head(ego_wildtype_df_m)
+
+```
+
+
+
+```{r}
+ego_occlusion_df_m$Group <- "Occlusion"
+ego_wildtype_df_m$Group <- "Wildtype"
+
+combined_df_m <- rbind(ego_occlusion_df_m, ego_wildtype_df_m)
+
+# Select top 10 from each group
+top_combined_m <- combined_df_m %>%
+  group_by(Group) %>%
+  slice_max(order_by = Count, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(top_combined_m, aes(x = reorder(Description, Count), y = Count, fill = Group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +
+  labs(title = "Top GO Terms by Condition", x = "GO Term", y = "Gene Count") +
+  theme_minimal()
+
+```
+
+```{r}
+# Top 10 enriched GO terms 
+top_terms_m <- ego_occlusion_df_m[1:10, ]
+
+ggplot(top_terms_m, aes(x = reorder(Description, p.adjust), y = p.adjust, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for mOSNs (Occlusion)",
+    x = "GO Term",
+    y = "p.adjust",
+    fill = "p.adjust"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+# Top 10 enriched GO terms 
+top_terms_m <- ego_occlusion_df_m[1:10, ]
+
+ggplot(top_terms_m, aes(x = reorder(Description, pvalue), y = pvalue, fill = pvalue)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for mOSNs (Occlusion)",
+    x = "GO Term",
+    y = "pvalue",
+    fill = "pvalue"
+  ) +
+  theme_minimal()
+
+```
+
+
+```{r}
+# Top 10 enriched GO terms 
+top_terms_m <- ego_occlusion_df_m[1:10, ]
+
+ggplot(top_terms_m, aes(x = reorder(Description, FoldEnrichment), y = FoldEnrichment, fill = FoldEnrichment)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for mOSNs (Occlusion)",
+    x = "GO Term",
+    y = "FoldEnrichment",
+    fill = "FoldEnrichment"
+  ) +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+```{r}
+# Top 10 enriched GO terms (adjust as needed)
+top_terms_m <- ego_wildtype_df_m[1:10, ]
+
+ggplot(top_terms_m, aes(x = reorder(Description, p.adjust), y = p.adjust, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(
+    title = "Top 10 Enriched GO Terms for mOSNs (Wildtype)",
+    x = "GO Term",
+    y = "p.adjust",
+    fill = "p.adjust"
+  ) +
+  theme_minimal()
+
+```
+
+
+##########
+
+
+```{r}
+
+
+# Extract the gene list 
+gene_list_m <- annotated_mosn_ais_de$Gene
+
+# Define background/universe genes (all genes tested in iosn.de)
+background_genes_m <- rownames(mosn.de)  # 
+
+# Run GO enrichment
+ego_ais_m <- enrichGO(
+  gene          = gene_list_m,
+  universe      = background_genes_m,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "ALL",          # or "BP", "MF", "CC"
+  pAdjustMethod = "BH"
+  #pvalueCutoff  = 0.01,
+ # qvalueCutoff  = 0.05
+)
+
+# Check results
+head(ego_ais_m)
+
+```
+
+
+```{r}
+ego_df_m <- as.data.frame(ego_ais_m)
+
+ggplot(ego_df_m[1:10, ], aes(x = reorder(Description, -Count), y = Count, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "red", high = "blue") +
+  labs(title = "Top 10 Enriched GO Terms", x = "GO Term", y = "Gene Count") +
+  theme_minimal()
+
+```
+
+
+##since cannot see which is wildtype or occlusion, have to separate them out
+
+```{r}
+### for immature
+# Upregulated in occlusion
+i_occlusion_up_genes <- subset(iosn.de.ais, avg_log2FC > 0)$Gene
+
+# Upregulated in wildtype
+i_wildtype_up_genes <- subset(iosn.de.ais, avg_log2FC < 0)$Gene
+
+```
+
+
+
+```{r}
+#  Run GO enrichment for occlusion-upregulated genes
+
+background_genes_i <- rownames(iosn.de)
+
+ego_occlusion_i <- enrichGO(
+  gene          = i_occlusion_up_genes,
+  universe      = background_genes_i,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "ALL",  
+  pAdjustMethod = "BH"
+  #pvalueCutoff  = 0.1,
+  #qvalueCutoff  = 0.1
+)
+
+#  Run GO enrichment for wildtype-upregulated genes
+ego_wildtype_i <- enrichGO(
+  gene          = i_wildtype_up_genes,
+  universe      = background_genes_i,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "ALL",
+  pAdjustMethod = "BH"
+  #pvalueCutoff  = 0.1,
+  #qvalueCutoff  = 0.1
+)
+
+# Step 5 
+head(as.data.frame(ego_occlusion_i))
+head(as.data.frame(ego_wildtype_i))
+```
+
+```{r}
+
+
+# Convert to data frames and add group labels
+ego_occlusion_df <- as.data.frame(ego_occlusion_i) %>%
+  mutate(Group = "Occlusion")
+
+ego_wildtype_df <- as.data.frame(ego_wildtype_i) %>%
+  mutate(Group = "Wildtype")
+
+# Combine them
+combined_ego_i_df <- bind_rows(ego_occlusion_df, ego_wildtype_df)
+
+# Plot top 10 GO terms per group (adjusted if fewer than 10 terms)
+combined_ego_i_df_top <- combined_ego_i_df %>%
+  group_by(Group) %>%
+  slice_min(order_by = p.adjust, n = 10) %>%
+  ungroup()
+
+# Barplot
+ggplot(combined_ego_i_df_top, aes(x = reorder(Description, -Count), y = Count, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "red", high = "blue") +
+  facet_wrap(~Group, scales = "free_y") +
+  labs(
+    title = "Top Enriched GO Terms in Occlusion vs Wildtype",
+    x = "GO Term",
+    y = "Gene Count"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+```
+
+
+```{r}
+### for mature
+# Upregulated in occlusion
+m_occlusion_up_genes <- subset(mosn.de.ais, avg_log2FC > 0)$Gene
+
+# Upregulated in wildtype
+m_wildtype_up_genes <- subset(mosn.de.ais, avg_log2FC < 0)$Gene
+
+```
+
+
+
+
+
+```{r}
+#  Run GO enrichment for occlusion-upregulated genes
+
+background_genes_m <- rownames(mosn.de)
+
+ego_occlusion_m <- enrichGO(
+  gene          = m_occlusion_up_genes,
+  universe      = background_genes_m,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "ALL",  
+  pAdjustMethod = "BH"
+  #pvalueCutoff  = 0.1,
+  #qvalueCutoff  = 0.1
+)
+
+#  Run GO enrichment for wildtype-upregulated genes
+ego_wildtype_m <- enrichGO(
+  gene          = m_wildtype_up_genes,
+  universe      = background_genes_m,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "ALL",
+  pAdjustMethod = "BH"
+  #pvalueCutoff  = 0.1,
+  #qvalueCutoff  = 0.1
+)
+
+# Step 5 
+head(as.data.frame(ego_occlusion_m))
+head(as.data.frame(ego_wildtype_m))
+```
+
+
+
+```{r}
+
+
+# Convert to data frames and add group labels
+ego_occlusion_m_df <- as.data.frame(ego_occlusion_m) %>%
+  mutate(Group = "Occlusion")
+
+ego_wildtype_m_df <- as.data.frame(ego_wildtype_m) %>%
+  mutate(Group = "Wildtype")
+
+# Combine them
+combined_ego_m_df <- bind_rows(ego_occlusion_m_df, ego_wildtype_m_df)
+
+# Plot top 10 GO terms per group (adjusted if fewer than 10 terms)
+combined_ego_m_df_top <- combined_ego_m_df %>%
+  group_by(Group) %>%
+  slice_min(order_by = p.adjust, n = 10) %>%
+  ungroup()
+
+# Barplot
+ggplot(combined_ego_m_df_top, aes(x = reorder(Description, -Count), y = Count, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "red", high = "blue") +
+  facet_wrap(~Group, scales = "free_y") +
+  labs(
+    title = "Top Enriched GO Terms in Occlusion vs Wildtype",
+    x = "GO Term",
+    y = "Gene Count"
+  ) +
+  theme_minimal() +
+  theme(strip.text = element_text(face = "bold"))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Volcano plot for iOSN with AIS gene categories
+ggplot(annotated_iosn_ais_de, aes(x = avg_log2FC, y = -log10(p_val_adj), color = Category)) +
+  geom_point() +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  theme_minimal() +
+  labs(title = "iOSN DE Genes with AIS Annotations")
+
+```
+
+
+
+```{r}
+# Volcano plot for iOSN with AIS gene categories
+ggplot(annotated_mosn_ais_de, aes(x = avg_log2FC, y = -log10(p_val_adj), color = Category)) +
+  geom_point() +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "gray") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "gray") +
+  theme_minimal() +
+  labs(title = "mOSN DE Genes with AIS Annotations")
+
+```
+
+
+
+```{r}
+annotated_iosn_ais_de %>%
+  group_by(Category) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = reorder(Category, -count), y = count, fill = Category)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Number of iOSN DE Genes per AIS Category", x = "AIS Category", y = "Count")
+```
+
+
+```{r}
+annotated_mosn_ais_de %>%
+  group_by(Category) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = reorder(Category, -count), y = count, fill = Category)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Number of mOSN DE Genes per AIS Category", x = "AIS Category", y = "Count")
+```
+
+
+```{r}
+# 
+DoHeatmap(harmony_nasal, features = unique(annotated_iosn_ais_de$Gene), group.by = "status") +
+  ggtitle("Heatmap of DE AIS Genes in iOSN")
+
+```
+
+
+```{r}
+# Example with Seurat object
+DoHeatmap(harmony_nasal, features = unique(annotated_mosn_ais_de$Gene), group.by = "status") +
+  ggtitle("Heatmap of DE AIS Genes in iOSN")
+
+```
+
+
+
+
+```{r}
+top_ais_genes_mosn <- head(annotated_mosn_ais_de$Gene, 10)  # top 10
+# Generate a list of violin plots
+vplots_ais <- lapply(top_ais_genes_mosn, function(gene) {
+  VlnPlot(harmony_nasal, features = gene, group.by = "status", pt.size = 0.9) +
+    ggtitle(gene)
+})
+
+vplots_ais[[1]]
+vplots_ais[[2]]
+vplots_ais[[3]]
+vplots_ais[[4]]
+vplots_ais[[5]]
+vplots_ais[[6]]
+vplots_ais[[7]]
+vplots_ais[[8]]
+vplots_ais[[9]]
+vplots_ais[[10]]
+
+
+```
+
+
+
+```{r}
+top_ais_genes_iosn <- head(annotated_iosn_ais_de$Gene, 8)  
+# Generate a list of violin plots
+vplots_i_ais <- lapply(top_ais_genes_iosn, function(gene) {
+  VlnPlot(harmony_nasal, features = gene, group.by = "status", pt.size = 0.9) +
+    ggtitle(gene)
+})
+
+vplots_i_ais[[1]]
+vplots_i_ais[[2]]
+vplots_i_ais[[3]]
+vplots_i_ais[[4]]
+vplots_i_ais[[5]]
+vplots_i_ais[[6]]
+vplots_i_ais[[7]]
+vplots_i_ais[[8]]
+
+
+```
+
+
+
+#Adding a new column indicating which comparison group each row belongs to
+```{r}
+annotated_iosn_ais_de$Region <- "iOSN"
+annotated_mosn_ais_de$Region <- "mOSN"
+
+```
+
+#combine to one data frame
+```{r}
+combined_ais_de <- rbind(annotated_iosn_ais_de, annotated_mosn_ais_de)
+
+```
+
+
+
+#calculating -log10 pvalue
+```{r}
+combined_ais_de$log_pval <- -log10(combined_ais_de$p_val_adj)
+combined_ais_de <- combined_ais_de[is.finite(combined_ais_de$log_pval), ]
+
+```
+
+
+```{r}
+combined_ais_de$Gene <- factor(combined_ais_de$Gene, levels = unique(combined_ais_de$Gene[order(combined_ais_de$log_pval, decreasing = TRUE)]))
+
+ggplot(combined_ais_de, aes(x = Region, y = Gene, size = log_pval, color = avg_log2FC)) +
+  geom_point() +
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  theme_minimal() +
+  labs(
+    title = "-log10(p-adj) for AIS Genes: Occlusion vs Wildtype",
+    x = "Region",
+    y = "Gene",
+    size = "-log10(p-adj)",
+    color = "Log2 Fold Change"
+  )
+```
+
+since avg_log2fc is calculated as avg_log2FC = log2(mean expression in occlusion / mean expression in wildtype), red means higer expression in occlusion and blue is higher in WT.
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+summary(nasal_seurat_selected$TopOSN_Score1)
+summary(nasal_seurat_selected$TopOSN_Score2)
+
+```
+
+```{r}
+head(nasal_seurat_selected@meta.data[, c("TopOSN_Score1", "TopOSN_Score2")])
+
+```
+
+
+
+
+
+
+
+
+
+aes(x = avg_log2FC, y = -log10(p_val_adj)))
+
+
+```{r}
+# Replace 0 p-values with a very small number
+de_results_clean <- de_results %>%
+  mutate(
+    p_val_adj = ifelse(p_val_adj == 0, 1e-300, p_val_adj),
+    avg_log2FC = ifelse(is.infinite(avg_log2FC), NA, avg_log2FC)
+  ) %>%
+  filter(!is.na(avg_log2FC))
+
+# Now plot
+EnhancedVolcano(de_results_clean,
+    lab = de_results_clean$gene,
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    title = 'Occlusion vs Wildtype',
+    pCutoff = 0.05,
+    FCcutoff = 1,
+    pointSize = 2.5,
+    labSize = 3.5
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+obj_harmony <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/obj_harmony.rds")
+```
+
+```{r}
+obj_harmony = RunUMAP(obj_harmony, reduction = "harmony", dims = 1:30, reduction.name = "umap.harmony")
+
+```
+
+
+```{r}
+# Color by sample or batch
+DimPlot(obj_harmony, reduction = "umap.harmony", group.by = "orig.ident", label = TRUE) +
+  ggtitle("UMAP Colored by Sample")
+
+```
+
+```{r}
+FeaturePlot(
+  obj_harmony,
+  features = c("TopOSN_Score1", "TopOSN_Score2"),
+  label = TRUE,
+  reduction =  "umap.harmony"
+)
+
+```
+
+
+# jus to separate by osns
+```{r}
+obj_harmony_3 <- obj_harmony
+```
+
+
+
+```{r}
+obj_harmony_3$NeuronStage <- ifelse(
+  obj_harmony_3$TopOSN_Score1 > obj_harmony_3$TopOSN_Score2, "Immature",
+  ifelse(obj_harmony_3$TopOSN_Score2 > obj_harmony_3$TopOSN_Score1, "Mature", "Unassigned")
+)
+
+
+```
+
+
+```{r}
+DimPlot(obj_harmony_3, reduction = "umap.harmony", split.by = "NeuronStage", label = FALSE) +
+  ggtitle("UMAP: OSN Types")
+
+```
+
+
+
+
+```{r}
+#continue from here
+merged_seurat_obj <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/merged_seurat_obj.rds")
+```
+
+
+```{r}
+
+merged_seurat_obj_copy <- merged_seurat_obj
+```
+
+```{r}
+DimPlot(merged_seurat_obj, reduction = "umap", label = FALSE) +
+  ggtitle("UMAP: Merged Seurat Objects")
+```
+
+
+
+```{r}
+merged_seurat_obj_copy$NeuronStage <- ifelse(
+  merged_seurat_obj_copy$TopOSN_Score1 > merged_seurat_obj_copy$TopOSN_Score2, "Immature",
+  ifelse(merged_seurat_obj_copy$TopOSN_Score2 > merged_seurat_obj_copy$TopOSN_Score1, "Mature", "Unassigned")
+)
+
+
+```
+
+
+```{r}
+DimPlot(merged_seurat_obj_copy, reduction = "umap", split.by = "NeuronStage", label = FALSE) +
+  ggtitle("UMAP: OSN Types")
+
+```
+
+
+```{r}
+DimPlot(obj_harmony, reduction = "umap.harmony", group.by = "orig.ident" ,label = FALSE)
+```
+
+
+
+
+

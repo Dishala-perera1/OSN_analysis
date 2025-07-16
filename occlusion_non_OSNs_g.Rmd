@@ -1,0 +1,311 @@
+---
+title: "occlusion_nonOSNs"
+output: html_document
+date: "2025-06-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#Setting working directory
+setwd("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#setting custom path
+.libPaths("/scratch/prj/dn_hamidlab_msc_proj/Libraries")
+```
+
+
+
+
+```{r}
+#load the libraries needed
+## load dependencies
+library(tidyverse)
+library(Seurat)
+library(SeuratObject)
+library(sp)
+library(scDblFinder)
+library(SingleCellExperiment)
+#library(SeuratWrappers)
+#library(SeuratDisk)
+library(patchwork)
+library(clustree)
+library(dplyr)
+library(XML)
+library(Matrix)
+library(glmGamPoi)
+library(gprofiler2)
+library(harmony)
+library(purrr)
+library(limma)
+library(umap)
+library(pheatmap)
+library(fgsea)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(rrvgo)
+library(slingshot)
+library(destiny)
+library(tradeSeq)
+library(EnhancedVolcano)
+```
+
+
+```{r}
+### from here load in this rds and continue
+nasal_seurat <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/FinalSCT_nasal_seurat.rds")
+```
+
+
+```{r}
+#importing mouse genes
+mouse_genes = read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/Dishalas_Filtered_OSN_Genes.csv")
+```
+
+
+```{r}
+#importing human genes
+human_genes = read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/Filtered_human_genes.csv")
+```
+
+
+```{r}
+# Filter the data for mOSN (mature OSN) cluster
+mouse_mOSN_info = mouse_genes[mouse_genes$cluster == "mOSN", ]
+
+# Filter the data for iOSN (immature OSN) cluster
+mouse_iOSN_info = mouse_genes[mouse_genes$cluster == "iOSN", ]
+```
+
+
+```{r}
+human_gene_lists = split(human_genes$gene, human_genes$cluster)
+
+# Separate into iOSN and mOSN genes
+human_mOSN_genes = human_genes[human_genes$cluster =="Mature Neurons", ]
+human_iOSN_genes = human_genes[human_genes$cluster =="Immature Neurons", ]
+
+
+# Convert human mOSN genes to mouse orthologs
+converted_human_mOSN_genes = gprofiler2::gorth(
+  human_mOSN_genes$gene, 
+  source_organism = "hsapiens", 
+  target_organism = "mmusculus"
+)
+
+# Convert human iOSN genes to mouse orthologs
+converted_human_iOSN_genes = gprofiler2::gorth(
+  human_iOSN_genes$gene, 
+  source_organism = "hsapiens", 
+  target_organism = "mmusculus"
+) 
+```
+
+
+
+```{r}
+# Extract only necessary columns
+converted_human_mOSN_df <- converted_human_mOSN_genes[, c("input", "ortholog_name")]
+converted_human_iOSN_df <- converted_human_iOSN_genes[, c("input", "ortholog_name")]
+
+# Renaming the column nmes
+colnames(converted_human_mOSN_df) <- c("gene", "mouse_gene")
+colnames(converted_human_iOSN_df) <- c("gene", "mouse_gene")
+
+# Merge back with original data to preserve other columns like p-value, avg_logFC and so on
+human_mOSN_info <- merge(human_mOSN_genes, converted_human_mOSN_df, 
+                         by = "gene", all.x = TRUE)
+
+human_iOSN_info <- merge(human_iOSN_genes, converted_human_iOSN_df, 
+                         by = "gene", all.x = TRUE)
+
+# Add source column
+human_mOSN_info$source <- "converted_human_mOSN"
+human_iOSN_info$source <- "converted_human_iOSN"
+
+# View results
+head(human_mOSN_info)
+head(human_iOSN_info)
+
+
+
+
+
+```
+
+
+
+
+```{r}
+
+# Standardisinge column names by ensuring all data frames have the same structure
+human_iOSN_info$species <- "Human"
+human_mOSN_info$species <- "Human"
+mouse_mOSN_info$species <- "Mouse"
+mouse_iOSN_info$species <- "Mouse"
+
+# Add missing columns (source in mouse dataset)
+mouse_mOSN_info$source <- "converted_mouse_mOSN"
+mouse_iOSN_info$source <- "converted_mouse_iOSN"
+
+# Making sure all have the same column order
+all_columns <- c("gene", "p_val", "avg_logFC", "pct.1", "pct.2", "p_val_adj", "cluster", "mouse_gene", "source", "species")
+
+# Add missing columns to mouse data frames
+mouse_mOSN_info$mouse_gene <- mouse_mOSN_info$gene
+mouse_iOSN_info$mouse_gene <- mouse_iOSN_info$gene
+
+# Bind all data frames
+combined_df <- bind_rows(
+  dplyr::select(mouse_mOSN_info, all_of(all_columns)),  
+  dplyr::select(mouse_iOSN_info, all_of(all_columns)),
+  dplyr::select(human_iOSN_info, all_of(all_columns)),  
+  dplyr::select(human_mOSN_info, all_of(all_columns))
+)
+
+# View the combined data frame
+head(combined_df)
+
+
+
+```
+
+
+
+```{r}
+combined_df %>%
+  distinct(mouse_gene, .keep_all = T) %>%   ##this line gets the distinct genes, gets rid of human duplicate
+  pull(cluster) %>% unique()
+```
+
+
+
+```{r}
+# Recode human clusters to match mouse clusters
+combined_df <- combined_df %>%
+  mutate(cluster = case_when(
+    cluster == "Immature Neurons" ~ "iOSN",  # Recode "Immature Neurons" to "iOSN"
+    cluster == "Mature Neurons" ~ "mOSN",    # Recode "Mature Neurons" to "mOSN"
+    TRUE ~ cluster                          # Keep other clusters unchanged
+  ))
+```
+
+
+```{r}
+combined_df %>%
+  group_by(cluster) %>%
+  slice_max(n=100, order_by = avg_logFC) %>%  ##getting the top 100 for mOSN and iOSN each according to avg_logFC
+  group_by(species, cluster) %>%
+  tally()
+```
+
+
+
+#extracting iOSN and mOSN genes separately
+```{r}
+top_mOSN_genes <- combined_df %>%
+  filter(cluster == "mOSN") %>%
+  slice_max(n = 100, order_by = avg_logFC) %>%
+  pull(mouse_gene)
+
+top_iOSN_genes <- combined_df %>%
+  filter(cluster == "iOSN") %>%
+  slice_max(n = 100, order_by = avg_logFC) %>%
+  pull(mouse_gene)
+
+
+
+```
+
+
+
+```{r}
+# Store in a list for AddModuleScore
+top_osn_gene_sets <- list("iOSN" = top_iOSN_genes, "mOSN" = top_mOSN_genes)
+```
+
+
+
+
+#doing add module score
+```{r}
+nasal_seurat <- AddModuleScore(object = nasal_seurat,
+    features = top_osn_gene_sets,  # List of gene sets
+    name = "TopOSN_Score",  
+    ctrl = 100, 
+    assay = "RNA"  )
+```
+
+
+
+#score 1 corresponds to immature, score 2 corresponds to mature
+
+
+
+```{r}
+FeaturePlot(
+  nasal_seurat,
+  features = c("TopOSN_Score1","TopOSN_Score2") 
+  
+)
+```
+
+
+
+```{r}
+DimPlot(nasal_seurat, reduction = "umap", label = TRUE)
+
+```
+
+
+
+```{r}
+# Subset
+occlusion_non_OSNs <- subset(nasal_seurat, idents = c("13","8", "27", "5", "16", "28", "7", "2", "3", "14", "0", "26",
+                                                      "20", "17", "24", "19", "12", "29"))
+
+```
+
+
+```{r}
+FeaturePlot(
+  occlusion_non_OSNs,
+  features = c("TopOSN_Score1","TopOSN_Score2") 
+  
+)
+```
+
+
+
+
+```{r}
+
+DimPlot(occlusion_non_OSNs, reduction = "umap", label = TRUE)
+
+```
+
+```{r}
+saveRDS(occlusion_non_OSNs, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/occlusion_non_OSNs.rds")
+```
+
+
+```{r}
+#continue from here
+occlusion_non_OSNs <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/occlusion_non_OSNs.rds")
+```
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,598 @@
+---
+title: "New_DE"
+output: html_document
+date: "2025-06-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#Setting working directory
+setwd("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#setting custom path
+.libPaths("/scratch/prj/dn_hamidlab_msc_proj/Libraries")
+```
+
+
+
+
+```{r}
+#load the libraries needed
+## load dependencies
+library(tidyverse)
+library(Seurat)
+library(SeuratObject)
+library(sp)
+library(scDblFinder)
+library(SingleCellExperiment)
+#library(SeuratWrappers)
+#library(SeuratDisk)
+library(patchwork)
+library(clustree)
+library(dplyr)
+library(XML)
+library(Matrix)
+library(glmGamPoi)
+library(gprofiler2)
+library(harmony)
+library(purrr)
+library(limma)
+library(umap)
+library(pheatmap)
+library(fgsea)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(rrvgo)
+library(slingshot)
+library(destiny)
+library(tradeSeq)
+```
+
+
+```{r}
+samples.seuratlist <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/After_Clustering_samples_seuratlist.rds")
+```
+
+
+```{r}
+#impoting mouse genes
+mouse_genes = read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/Dishalas_Filtered_OSN_Genes.csv")
+```
+
+```{r}
+#importing human genes
+human_genes = read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/Filtered_human_genes.csv")
+```
+
+
+```{r}
+# Filter the data for mOSN (mature OSN) cluster
+mouse_mOSN_info = mouse_genes[mouse_genes$cluster == "mOSN", ]
+
+# Filter the data for iOSN (immature OSN) cluster
+mouse_iOSN_info = mouse_genes[mouse_genes$cluster == "iOSN", ]
+```
+
+```{r}
+human_gene_lists = split(human_genes$gene, human_genes$cluster)
+
+# Separate into iOSN and mOSN genes
+human_mOSN_genes = human_genes[human_genes$cluster =="Mature Neurons", ]
+human_iOSN_genes = human_genes[human_genes$cluster =="Immature Neurons", ]
+
+
+# Convert human mOSN genes to mouse orthologs
+converted_human_mOSN_genes = gprofiler2::gorth(
+  human_mOSN_genes$gene, 
+  source_organism = "hsapiens", 
+  target_organism = "mmusculus"
+)
+
+# Convert human iOSN genes to mouse orthologs
+converted_human_iOSN_genes = gprofiler2::gorth(
+  human_iOSN_genes$gene, 
+  source_organism = "hsapiens", 
+  target_organism = "mmusculus"
+) 
+```
+
+
+```{r}
+# Extract only necessary columns
+converted_human_mOSN_df <- converted_human_mOSN_genes[, c("input", "ortholog_name")]
+converted_human_iOSN_df <- converted_human_iOSN_genes[, c("input", "ortholog_name")]
+
+# Renaming the column nmes
+colnames(converted_human_mOSN_df) <- c("gene", "mouse_gene")
+colnames(converted_human_iOSN_df) <- c("gene", "mouse_gene")
+
+# Merge back with original data to preserve other columns like p-value, avg_logFC and so on
+human_mOSN_info <- merge(human_mOSN_genes, converted_human_mOSN_df, 
+                         by = "gene", all.x = TRUE)
+
+human_iOSN_info <- merge(human_iOSN_genes, converted_human_iOSN_df, 
+                         by = "gene", all.x = TRUE)
+
+# Add source column
+human_mOSN_info$source <- "converted_human_mOSN"
+human_iOSN_info$source <- "converted_human_iOSN"
+
+# View results
+head(human_mOSN_info)
+head(human_iOSN_info)
+
+
+
+
+
+```
+
+```{r}
+
+
+# Standardisinge column names by ensuring all data frames have the same structure
+human_iOSN_info$species <- "Human"
+human_mOSN_info$species <- "Human"
+mouse_mOSN_info$species <- "Mouse"
+mouse_iOSN_info$species <- "Mouse"
+
+# Add missing columns (source in mouse dataset)
+mouse_mOSN_info$source <- "converted_mouse_mOSN"
+mouse_iOSN_info$source <- "converted_mouse_iOSN"
+
+# Making sure all have the same column order
+all_columns <- c("gene", "p_val", "avg_logFC", "pct.1", "pct.2", "p_val_adj", "cluster", "mouse_gene", "source", "species")
+
+# Add missing columns to mouse data frames
+mouse_mOSN_info$mouse_gene <- mouse_mOSN_info$gene
+mouse_iOSN_info$mouse_gene <- mouse_iOSN_info$gene
+
+# Bind all data frames
+combined_df <- bind_rows(
+  dplyr::select(mouse_mOSN_info, all_of(all_columns)),  
+  dplyr::select(mouse_iOSN_info, all_of(all_columns)),
+  dplyr::select(human_iOSN_info, all_of(all_columns)),  
+  dplyr::select(human_mOSN_info, all_of(all_columns))
+)
+
+# View the combined data frame
+head(combined_df)
+
+
+
+```
+
+
+```{r}
+combined_df %>%
+  distinct(mouse_gene, .keep_all = T) %>%   ##this line gets the distinct genes, gets rid of human duplicate
+  pull(cluster) %>% unique()
+```
+
+
+```{r}
+
+
+# Get list of genes for each mouse sample 
+mouse_gene_lists <- lapply(samples.seuratlist, function(sample) {
+    rownames(sample)  # Extract gene names from each Seurat object
+})
+
+
+# Find genes common in all mouse samples
+common_mouse_genes <- Reduce(intersect, mouse_gene_lists)
+
+# Filter the dataframe: Keep human genes & only common mouse genes
+filtered_df <- combined_df %>%
+  filter(mouse_gene %in% common_mouse_genes)
+
+# View the filtered data
+head(filtered_df)
+
+```
+
+
+```{r}
+# Find genes that are in combined_df but not in filtered_df
+removed_genes <- setdiff(combined_df$mouse_gene, filtered_df$mouse_gene)
+
+# View the removed genes
+removed_genes                        ####to see which genes are not common amongst the 8 samples, includes human genes
+
+```
+
+
+```{r}
+# Check if removed genes are from Human or Mouse
+removed_genes_info <- combined_df %>%
+  filter(gene %in% removed_genes) %>%
+  dplyr::select(gene, species, source)
+
+# View the removed genes' details
+removed_genes_info
+
+```
+
+```{r}
+#just checking where one of these genes is missing
+
+str_subset(rownames(samples.seuratlist$GSE146043_3), "Fam213b")
+
+ 
+str_subset(rownames(samples.seuratlist$GSE146043_4), "Fam213b")
+
+
+str_subset(rownames(samples.seuratlist$GSE185168_1), "Fam213b")
+
+##missing in GSE185168_1
+```
+
+
+```{r}
+filtered_df %>%
+  distinct(mouse_gene, .keep_all = T) %>%   ##this line gets the distinct genes, gets rid of human duplicate
+  pull(cluster) %>% unique()
+```
+
+
+```{r}
+# Recode human clusters to match mouse clusters
+filtered_df <- filtered_df %>%
+  mutate(cluster = case_when(
+    cluster == "Immature Neurons" ~ "iOSN",  # Recode "Immature Neurons" to "iOSN"
+    cluster == "Mature Neurons" ~ "mOSN",    # Recode "Mature Neurons" to "mOSN"
+    TRUE ~ cluster                          # Keep other clusters unchanged
+  ))
+```
+
+
+```{r}
+
+
+# getting the top mOSN 
+#top_100_mOSN <- filtered_df %>%
+ # filter(cluster == "mOSN") %>%   # Filter for mOSN cluster
+ # arrange(desc(avg_logFC)) %>%  # Sort avg_logFC in descending order
+  #head(100)     # Select top 100 genes
+
+# getting the top iOSN
+#top_100_iOSN <- filtered_df %>%
+  #filter(cluster == "iOSN") %>%  # Filter for iOSN cluster
+  #arrange(desc(avg_logFC)) %>%   # Sort avg_logFC in descending order
+  #head(100)   # Select top 100 genes
+
+
+filtered_df %>%
+  group_by(cluster) %>%
+  slice_max(n=100, order_by = avg_logFC) %>%  ##getting the top 100 for mOSN and iOSN each according to avg_logFC
+  group_by(species, cluster) %>%
+  tally()
+```
+
+#extracting iOSN and mOSN genes separately
+```{r}
+top_mOSN_genes <- filtered_df %>%
+  filter(cluster == "mOSN") %>%
+  slice_max(n = 100, order_by = avg_logFC) %>%
+  pull(gene)
+
+top_iOSN_genes <- filtered_df %>%
+  filter(cluster == "iOSN") %>%
+  slice_max(n = 100, order_by = avg_logFC) %>%
+  pull(gene)
+
+# Store in a list for AddModuleScore
+top_osn_gene_sets <- list("iOSN" = top_iOSN_genes, "mOSN" = top_mOSN_genes)
+
+```
+
+
+
+
+
+
+
+
+
+#doing the add module score
+```{r}
+samples.seuratlist <- lapply(samples.seuratlist, function(sample) {
+  AddModuleScore(
+    object = sample,
+    features = top_osn_gene_sets,  # List of gene sets
+    name = "TopOSN_Score",  
+    ctrl = 100, 
+    assay = "RNA"  
+  )
+})
+
+
+
+```
+
+
+
+```{r}
+FeaturePlot(
+  samples.seuratlist$GSE146043_1,
+  features = c("TopOSN_Score1","TopOSN_Score2") 
+  
+)
+```
+
+```{r}
+
+
+# Set cluster identities to "SCT_snn_res.0.8"
+Idents(samples.seuratlist$GSE146043_2) <- "SCT_snn_res.0.8"
+
+# Feature plots for TopOSN_Score1 and TopOSN_Score2 for sample 2
+FeaturePlot(samples.seuratlist$GSE146043_2, 
+            features = "TopOSN_Score1", 
+            label = TRUE, 
+            min.cutoff = 0)
+
+FeaturePlot(samples.seuratlist$GSE146043_2, 
+            features = "TopOSN_Score2", 
+            label = TRUE, 
+            min.cutoff = 0)
+
+# Summarise TopOSN scores per cluster
+samples.seuratlist$GSE146043_2@meta.data %>%
+  group_by(SCT_snn_res.0.8) %>%
+  summarise(
+    TopOSN_Score1_avg = mean(TopOSN_Score1, na.rm = TRUE),
+    TopOSN_Score1_exp_perc = sum(TopOSN_Score1 > 0.1, na.rm = TRUE) / n(),
+    TopOSN_Score2_avg = mean(TopOSN_Score2, na.rm = TRUE),
+    TopOSN_Score2_exp_perc = sum(TopOSN_Score2 > 0.1, na.rm = TRUE) / n()
+  )
+
+
+
+
+
+```
+
+
+```{r}
+cluster_OSN_avg_scores <- lapply(samples.seuratlist, function(sample) {
+  sample@meta.data %>%
+    group_by(SCT_snn_res.0.8) %>%
+    summarise(
+      TopOSN_Score1_avg = mean(TopOSN_Score1, na.rm = TRUE),
+      TopOSN_Score1_exp_perc = sum(TopOSN_Score1 > 0.1, na.rm = TRUE) / n(),
+      TopOSN_Score2_avg = mean(TopOSN_Score2, na.rm = TRUE),
+      TopOSN_Score2_exp_perc = sum(TopOSN_Score2 > 0.1, na.rm = TRUE) / n()
+    )
+})
+
+# Assign names to the list to keep track of each dataset
+names(cluster_OSN_avg_scores) <- names(samples.seuratlist)
+
+
+cluster_OSN_avg_scores
+
+```
+
+
+```{r}
+
+lapply(names(samples.seuratlist), function(sample) {
+  Idents(samples.seuratlist[[sample]]) <- "SCT_snn_res.0.8"  #### Set cluster identities based on SCT_snn_res.0.8
+  
+  # Generate FeaturePlots
+  Score1plot <- FeaturePlot(samples.seuratlist[[sample]], features = "TopOSN_Score1", 
+                            min.cutoff = 0, label = TRUE) + 
+        ggtitle(paste(sample, "- TopOSN_Score1"))
+  
+  Score2plot <- FeaturePlot(samples.seuratlist[[sample]], features = "TopOSN_Score2", 
+                            min.cutoff = 0, label = TRUE) + 
+        ggtitle(paste(sample, "- TopOSN_Score2"))
+
+  # Print the plots
+  print(Score1plot)
+  print(Score2plot)
+})
+
+
+
+
+```
+
+
+
+
+
+
+
+#Making seurat object of no iOSN or mOSNs
+
+
+
+
+
+
+```{r}
+lapply(samples.seuratlist, DimPlot, label= TRUE)
+```
+
+
+
+```{r}
+# Choosing clusters wanted
+selected_clusters <- list(
+  GSE146043_1 = c("2","5","6","7"),        ### checked
+  GSE146043_2 = c("4", "5", "6", "9"),     ## checked
+  GSE146043_3 = c("6", "7", "8", "9"),     ## checked 
+  GSE146043_4 = c("3", "4", "5", "8", "9"),## checked
+  GSE185168_1 = c("9"),   ### checked
+  GSE185168_2 = c("5"),   ## checked
+  GSE185168_3 = c("2", "7", "8"),   ## checked
+  GSE185168_4 = c("2","3","5","6","7","8","9") #checked
+)
+
+```
+
+
+```{r}
+
+non_OSNs <- mapply(function(seurat_obj, clusters) {
+  subset(seurat_obj, idents = clusters)
+}, samples.seuratlist[names(selected_clusters)], selected_clusters, SIMPLIFY = FALSE)
+
+
+```
+
+
+
+
+
+```{r}
+FeaturePlot(
+  non_OSNs$GSE185168_4,
+  features = c("TopOSN_Score1","TopOSN_Score2") 
+  
+)
+```
+
+
+
+```{r}
+DimPlot(non_OSNs$GSE185168_4, reduction = "umap", label = TRUE)
+
+```
+
+
+```{r}
+# Subset Seurat object to only include cluster 5 from umap
+non_OSNs$GSE185168_4 <- subset(non_OSNs$GSE185168_4, idents = "5")
+
+```
+
+
+```{r}
+# Subset Seurat object to only include cluster 2 from umap
+non_OSNs$GSE185168_3 <- subset(non_OSNs$GSE185168_3, idents = "2")
+
+```
+
+
+##merging all non-osn objects 
+```{r}
+merged_non_OSNs <- merge(
+  non_OSNs[[1]],
+  y = non_OSNs[-1],
+  add.cell.ids = names(non_OSNs)
+)
+
+```
+
+#Running SCT transform
+```{r}
+merged_non_OSNs <- SCTransform(merged_non_OSNs, method = "glmGamPoi", verbose = FALSE)
+```
+
+
+```{r}
+merged_non_OSNs <- RunPCA(merged_non_OSNs, verbose = FALSE)
+
+# Find neighbors based on PCA
+merged_non_OSNs <- FindNeighbors(merged_non_OSNs, dims = 1:50)
+
+# Find clusters 
+merged_non_OSNs <- FindClusters(merged_non_OSNs, resolution = 2)
+
+# Visualise clusters using UMAP
+merged_non_OSNs <- RunUMAP(merged_non_OSNs, dims = 1:50)
+```
+
+
+```{r}
+FeaturePlot(merged_non_OSNs, features = c("TopOSN_Score1", "TopOSN_Score2"))
+
+```
+
+```{r}
+saveRDS(merged_non_OSNs, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/merged_non_OSNs.rds")
+```
+
+
+
+#harmony again
+```{r}
+merged_non_OSNs <- IntegrateLayers(
+  object = merged_non_OSNs, method = HarmonyIntegration, normalization.method = "SCT",
+  orig.reduction = "pca", new.reduction = "harmony",
+  verbose = FALSE
+)
+```
+
+```{r}
+# Run UMAP 
+merged_non_OSNs <- RunUMAP(merged_non_OSNs, reduction = "harmony", dims = 1:30, reduction.name = "umap.harmony")
+
+
+merged_non_OSNs <- FindNeighbors(merged_non_OSNs, reduction = "harmony", dims = 1:30)
+merged_non_OSNs <- FindClusters(merged_non_OSNs, resolution = 1, cluster.name = "harmony_clusters")
+
+# plot UMAP grouped by newly created clusters
+p1_harmony <- DimPlot(
+  merged_non_OSNs,
+  reduction = "umap.harmony",
+  group.by = "harmony_clusters"
+)
+
+# Plot gene scores
+FeaturePlot(
+  merged_non_OSNs,
+  features = c("TopOSN_Score1", "TopOSN_Score2"),
+  label = TRUE,
+  reduction = "umap.harmony"
+)
+
+```
+
+
+```{r}
+FeaturePlot(merged_non_OSNs, features = c("TopOSN_Score1", "TopOSN_Score2"))
+
+```
+
+
+```{r}
+FeaturePlot(
+  merged_non_OSNs,
+  features = c("TopOSN_Score1", "TopOSN_Score2"),
+  label = TRUE,
+  reduction = "harmony"
+)
+```
+
+```{r}
+saveRDS(merged_non_OSNs, file = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/merged_non_OSNs.rds")
+```
+
+
+```{r}
+#continue from here
+merged_non_OSNs <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/merged_non_OSNs.rds")
+```
+
+
+```{r}
+FeaturePlot(
+  merged_non_OSNs,
+  features = c("TopOSN_Score1", "TopOSN_Score2"),
+  label = TRUE,
+  reduction = "umap.harmony"
+)
+```
+
+
+

@@ -1,0 +1,764 @@
+---
+title: "Differential expression"
+output: html_document
+date: "2025-06-19"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#Setting working directory
+setwd("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals")
+```
+
+```{r}
+#setting custom path
+.libPaths("/scratch/prj/dn_hamidlab_msc_proj/Libraries")
+```
+
+
+
+
+```{r}
+#load the libraries needed
+## load dependencies
+library(tidyverse)
+library(Seurat)
+library(SeuratObject)
+library(sp)
+library(scDblFinder)
+library(SingleCellExperiment)
+#library(SeuratWrappers)
+#library(SeuratDisk)
+library(patchwork)
+library(clustree)
+library(dplyr)
+library(XML)
+library(Matrix)
+library(glmGamPoi)
+library(gprofiler2)
+library(harmony)
+library(purrr)
+library(limma)
+library(umap)
+library(pheatmap)
+library(fgsea)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(rrvgo)
+library(slingshot)
+library(destiny)
+library(tradeSeq)
+```
+
+
+
+
+## loading in the non-OSNs from the wildtype
+```{r}
+#continue from here
+merged_non_OSNs <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/merged_non_OSNs.rds")
+```
+
+
+
+## loading in the non OSNs from the occlusion
+```{r}
+#continue from here
+occlusion_non_OSNs <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/occlusion_non_OSNs.rds")
+```
+
+
+#duplicating them
+```{r}
+merged_non_OSNs_2 <- merged_non_OSNs
+occlusion_non_OSNs_2 <- occlusion_non_OSNs
+
+
+```
+
+
+```{r}
+merged_non_OSNs_2$status <- "wildtype"
+occlusion_non_OSNs_2$status <- "occlusion"
+
+```
+
+
+
+```{r}
+DefaultAssay(merged_non_OSNs_2) <- "RNA"
+DefaultAssay(occlusion_non_OSNs_2) <- "RNA"
+
+merged_non_OSNs_2[["SCT"]] <- NULL
+occlusion_non_OSNs_2[["SCT"]] <- NULL
+
+```
+
+
+
+
+
+
+## merging the two non-OSN datasets together
+
+```{r}
+#merging the seurat objects
+
+combined_non_OSNs <- merge(x = merged_non_OSNs_2, y = occlusion_non_OSNs_2)
+
+```
+
+
+```{r}
+# Rerun SCTransform  
+combined_non_OSNs <- SCTransform(combined_non_OSNs, verbose = FALSE)
+
+#Run PCA and UMAP for visualization
+combined_non_OSNs <- RunPCA(combined_non_OSNs, verbose = FALSE)
+combined_non_OSNs <- RunUMAP(combined_non_OSNs, dims = 1:30)
+
+
+```
+
+```{r}
+# Plot UMAP 
+DimPlot(combined_non_OSNs, group.by = "orig.ident", label = TRUE) + NoLegend()
+
+
+```
+
+
+
+
+
+#Differential Expression Between wildtype and occlusion
+
+```{r}
+# Set SCT as default assay
+DefaultAssay(combined_non_OSNs) <- "SCT"
+
+# Prep for DE using SCT assay
+combined_non_OSNs <- PrepSCTFindMarkers(combined_non_OSNs)
+
+# Set the identity class
+Idents(combined_non_OSNs) <- "status"
+
+# Run DE between occlusion and wildtype
+status.de.markers_non <- FindMarkers(combined_non_OSNs,
+                                 ident.1 = "occlusion",
+                                 ident.2 = "wildtype",
+                                 logfc.threshold = 0.25,
+                                 min.pct = 0.1,
+                                 only.pos = FALSE,
+                                 assay = "SCT")
+
+# View results
+head(status.de.markers_non)
+```
+
+
+other 0.25
+```{r}
+#Defining the significance thresholds
+pval_threshold <- 0.05
+logfc_threshold <- 0.25
+
+# Subset dataframe for significant genes (adjusted p-value and log fold change)
+significant_genes_df <- status.de.markers_non[
+  status.de.markers_non$p_val_adj < pval_threshold & 
+  abs(status.de.markers_non$avg_log2FC) > logfc_threshold, 
+]
+
+# View the first few significant genes
+head(significant_genes_df)
+
+```
+
+
+## loading in data frame for significant differentially expressed genes from OSNs
+```{r}
+significant_OSN_genes_df <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/significant_OSN_genes_df.rds")
+```
+
+```{r}
+head(significant_OSN_genes_df)
+```
+
+
+```{r}
+# Get gene names from both dataframes 
+genes_in_significant_genes_df <- rownames(significant_genes_df)
+genes_in_significant_OSN_genes_df <- rownames(significant_OSN_genes_df)
+
+# Find genes unique to significant_OSN_genes_df
+unique_genes_OSN <- setdiff(genes_in_significant_OSN_genes_df, genes_in_significant_genes_df)
+
+# Subset significant_OSN_genes_df to keep only unique genes
+unique_significant_OSN_df <- significant_OSN_genes_df[unique_genes_OSN, ]
+
+# View the first few rows
+head(unique_significant_OSN_df)
+
+```
+
+
+#creating the universe, gather genes of combined_non_OSNs and of harmony_nasal
+
+loading in the harmony_nasal
+```{r}
+
+#continue from here
+harmony_nasal <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/harmony_nasal.rds")
+```
+
+
+
+#making vector of genes from harmony_nasal
+```{r}
+OSN_gene_list <- rownames(harmony_nasal)
+head(OSN_gene_list)
+```
+
+##making vector of genes from the nonOSNs
+```{r}
+non_OSN_gene_list <- rownames(combined_non_OSNs)
+head(non_OSN_gene_list)
+```
+
+##actually creating the universe vector, while removing duplicates
+```{r}
+universe_list <- unique(c(OSN_gene_list, non_OSN_gene_list))
+```
+
+
+## this entire workflow was to find differentially expressing genes that were only present in OSNs by looking at differentially expressing genes in non OSNs too, and then taking the unique differentially expressing genes in OSNs
+
+
+```{r}
+
+GO <- enrichGO(gene         = rownames(unique_significant_OSN_df),
+                universe      = universe_list,
+                OrgDb         = org.Mm.eg.db,
+                keyType       = 'SYMBOL',
+                ont           = "All",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+head(GO)    
+```
+
+
+
+
+```{r}
+barplot(GO, showCategory = 10, title = "Gene Ontology Enrichment")
+```
+                          
+
+```{r}
+# Convert GO result to data frame
+GO_df <- as.data.frame(GO)
+
+# Take top 10 by p-value
+top_GO <- GO_df %>%
+  arrange(pvalue) %>%
+  slice(1:10)
+
+# Plot
+ggplot(top_GO, aes(x = reorder(Description, -log10(pvalue)), y = -log10(pvalue), fill = -log10(pvalue))) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "skyblue", high = "red") +
+  labs(
+    x = "GO Term",
+    y = "-log10(p-value)",
+    title = "GO Enrichment by p-value",
+    fill = "-log10(p-value)"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+
+```{r}
+# Convert GO to dataframe 
+GO_df <- as.data.frame(GO)
+
+# Take top 10 by Fold Enrichment
+top_GO <- GO_df %>%
+  arrange(desc(FoldEnrichment)) %>%
+  slice(1:10)
+
+# Plot
+ggplot(top_GO, aes(x = reorder(Description, FoldEnrichment), 
+                   y = FoldEnrichment, 
+                   fill = FoldEnrichment)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(
+    title = "Top GO Terms by Fold Enrichment",
+    x = "GO Term",
+    y = "Fold Enrichment",
+    fill = "FoldEnrichment"
+  ) +
+  theme_minimal()
+```
+
+
+use significant non-osns to remove non-osns from volcano plot and the replot. Volcano plot should have significant and non-significant genes. From the nasal_occlusion_edits markdown
+
+# dataframe of significant non-OSN genes
+```{r}
+head(significant_genes_df)
+```
+
+
+
+
+
+
+```{r}
+
+status.de.markers <- readRDS("/scratch/prj/dn_hamidlab_msc_proj/k24082190/Outputs/status.de.markers.rds")
+```
+
+
+```{r}
+head(status.de.markers)
+```
+
+
+
+```{r}#
+status.de.markers %>% 
+  rownames_to_column("Gene") %>%
+  filter(!Gene %in% rownames(significant_genes_df))
+```
+
+
+
+
+```{r}
+filtered_status.de.markers <-status.de.markers %>% 
+  rownames_to_column("Gene") %>%
+  filter(!Gene %in% rownames(significant_genes_df))
+```
+
+```{r}
+head(filtered_status.de.markers)
+```
+
+
+
+
+
+
+
+
+```{r}
+# Prepare data for volcano plot
+volcano_data <- filtered_status.de.markers
+volcano_data$gene <- filtered_status.de.markers$Gene
+
+ggplot(volcano_data, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(alpha = 0.5) +
+  theme_minimal() +
+  xlab("Average Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-value") +
+  geom_vline(xintercept = c(-0.5, 0.5), col = "red", linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), col = "red", linetype = "dashed") +
+  geom_text(data = subset(volcano_data, p_val_adj < 0.05 & abs(avg_log2FC) > 1),
+            aes(label = gene), vjust = 1, hjust = 1, size = 3)
+
+```
+
+```{r}
+# Add status column for color coding
+volcano_data <- filtered_status.de.markers
+volcano_data$gene <- volcano_data$Gene
+
+volcano_data <- volcano_data %>%
+  mutate(status = case_when(
+    p_val_adj < 0.05 & avg_log2FC > 0.25 ~ "Upregulated",
+    p_val_adj < 0.05 & avg_log2FC < -0.25 ~ "Downregulated",
+    TRUE ~ "Not Significant"
+  ))
+
+# Volcano plot with color-coded points
+ggplot(volcano_data, aes(x = avg_log2FC, y = -log10(p_val_adj), color = status)) +
+  geom_point(alpha = 0.7) +
+  scale_color_manual(values = c(
+    "Upregulated" = "red",
+    "Downregulated" = "steelblue",
+    "Not Significant" = "grey"
+  )) +
+  theme_minimal() +
+  xlab("Average Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-value") +
+  geom_vline(xintercept = c(-0.5, 0.5), col = "black", linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), col = "black", linetype = "dashed") +
+  geom_text(
+    data = subset(volcano_data, p_val_adj < 0.05 & abs(avg_log2FC) > 1),
+    aes(label = gene), vjust = 1, hjust = 1, size = 3, check_overlap = TRUE
+  )
+
+```
+
+
+```{r}
+# Volcano plot with color-coded points (no gene labels)
+ggplot(volcano_data, aes(x = avg_log2FC, y = -log10(p_val_adj), color = status)) +
+  geom_point(alpha = 0.7) +
+  scale_color_manual(values = c(
+    "Upregulated" = "red",
+    "Downregulated" = "steelblue",
+    "Not Significant" = "grey"
+  )) +
+  theme_minimal() +
+  xlab("Average Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-value") +
+  geom_vline(xintercept = c(-0.5, 0.5), col = "black", linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), col = "black", linetype = "dashed")
+
+```
+
+
+
+
+
+
+```{r}
+AIS_categories <- read.csv("/scratch/prj/dn_hamidlab_msc_proj/k24082190/originals/New_AIS_cat_prop.csv")
+```
+
+
+
+```{r}
+AIS_categories[12, 5] <- "Enzyme"
+```
+
+
+
+
+```{r}
+AIS_categories <- AIS_categories %>%
+  filter(!grepl("look above", AIS_specific, ignore.case = TRUE))
+
+```
+
+```{r}
+AIS_categories <- AIS_categories %>%
+  filter(!grepl("look below", AIS_specific, ignore.case = TRUE))
+```
+
+
+```{r}
+new_AIS_genes_df <- as.data.frame(AIS_categories)
+```
+
+
+```{r}
+keeps <- c("Mouse_name", "AIS_specific")
+```
+
+
+```{r}
+new_AIS_genes_df <- new_AIS_genes_df[keeps]
+```
+
+
+```{r}
+head(new_AIS_genes_df)
+```
+
+
+
+```{r}
+new_AIS_genes_df <- new_AIS_genes_df[new_AIS_genes_df$AIS_specific %in% c("yes", "maybe", "Yes", "Maybe"), ]
+
+```
+
+
+```{r}
+new_AIS_genes_df[17, 1] <- "Kcnb2"
+
+```
+
+
+```{r}
+new_AIS_genes <- as.character(new_AIS_genes_df$Mouse_name)
+```
+
+```{r}
+new_AIS_genes
+```
+
+```{r}
+head(filtered_status.de.markers)
+```
+
+
+creates a new dataframe, filtered_status.de.markers_AIS, that only includes rows where Gene is in the new_AIS_genes vector.
+```{r}
+filtered_status.de.markers_AIS <- filtered_status.de.markers %>%
+  filter(Gene %in% new_AIS_genes)
+```
+
+```{r}
+head(filtered_status.de.markers_AIS)
+```
+
+
+
+
+
+
+#top 10 differentially expressed AIS genes
+```{r}
+# Top 10 genes by adjusted p-value
+top_10_genes <- filtered_status.de.markers_AIS %>%
+  arrange(p_val_adj) %>%
+  slice_head(n = 10) %>%
+  pull(Gene)
+
+```
+
+
+```{r}
+# Create individual violin plots for each 
+vplots <- lapply(top_10_genes, function(gene) {
+  VlnPlot(harmony_nasal, features = gene, group.by = "status", pt.size = 0.9) +
+    ggtitle(gene)+
+    theme(legend.position = "none")
+})
+
+
+vplots[[1]]
+vplots[[2]]
+vplots[[3]]
+vplots[[4]]
+vplots[[5]]
+vplots[[6]]
+vplots[[7]]
+vplots[[8]]
+vplots[[9]]
+vplots[[10]]
+
+```
+
+
+
+```{r}
+wrap_plots(vplots[c(1, 3, 4, 5)], ncol = 2)
+
+
+```
+
+
+```{r}
+head(filtered_status.de.markers)
+```
+
+## doing differential expression between the two
+
+```{r}
+filtered_status.de.markers <- filtered_status.de.markers %>%
+  mutate(direction = ifelse(avg_log2FC > 0, "occlusion", "wildtype"))
+```
+
+```{r}
+genes_up_in_occlusion <- filtered_status.de.markers %>%
+  filter(direction == "occlusion", p_val_adj < 0.05) %>%
+  pull(Gene)
+
+genes_up_in_wildtype <- filtered_status.de.markers %>%
+  filter(direction == "wildtype", p_val_adj < 0.05) %>%
+  pull(Gene)
+
+```
+
+```{r}
+# GO enrichment
+ego_occlusion_filtered <- enrichGO(gene = genes_up_in_occlusion,
+                          universe      = universe_list,         
+                          OrgDb = org.Mm.eg.db,
+                          keyType = "SYMBOL",
+                          ont = "ALL",  
+                          pAdjustMethod = "BH",
+                          qvalueCutoff = 0.05,
+                          readable = TRUE)
+
+ego_wildtype_filtered <- enrichGO(gene = genes_up_in_wildtype,
+                         universe      = universe_list,
+                         OrgDb = org.Mm.eg.db,
+                         keyType = "SYMBOL",
+                         ont = "ALL",
+                         pAdjustMethod = "BH",
+                         qvalueCutoff = 0.05,
+                         readable = TRUE)
+```
+
+
+```{r}
+barplot(ego_occlusion_filtered, showCategory = 10, title = "GO Enrichment: Occlusion Upregulated")
+barplot(ego_wildtype_filtered, showCategory = 10, title = "GO Enrichment: Wildtype Upregulated")
+
+```
+
+
+```{r}
+df_occlusion <- as.data.frame(ego_occlusion_filtered)
+df_wildtype <- as.data.frame(ego_wildtype_filtered)
+
+```
+
+
+
+```{r}
+# Occlusion plot
+ggplot(head(df_occlusion[order(-df_occlusion$FoldEnrichment), ], 10),
+       aes(x = reorder(Description, FoldEnrichment), y = FoldEnrichment, fill = FoldEnrichment)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "GO Enrichment: Occlusion Upregulated",
+       x = "GO Term", y = "Fold Enrichment") +
+  theme_minimal()
+
+# Wildtype plot
+ggplot(head(df_wildtype[order(-df_wildtype$FoldEnrichment), ], 10),
+       aes(x = reorder(Description, FoldEnrichment), y = FoldEnrichment, fill = FoldEnrichment)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "GO Enrichment: Wildtype Upregulated",
+       x = "GO Term", y = "Fold Enrichment") +
+  theme_minimal()
+```
+
+
+```{r}
+# Occlusion plot
+ggplot(
+  head(df_occlusion[order(-df_occlusion$FoldEnrichment), ], 10),
+  aes(x = reorder(Description, FoldEnrichment), y = FoldEnrichment, fill = FoldEnrichment)
+) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "GO Enrichment: Occlusion Upregulated",
+       x = "GO Term", y = "Fold Enrichment") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14),
+    axis.title = element_text(size = 13)
+  )
+
+# Wildtype plot clean label and enlarge text
+df_wildtype_clean <- df_wildtype %>%
+  mutate(Description = str_replace(
+    Description,
+    "protein insertion into ER membrane by stop-transfer membrane-anchor sequence",
+    "protein insertion into ER membrane"
+  ))
+
+ggplot(
+  head(df_wildtype_clean[order(-df_wildtype_clean$FoldEnrichment), ], 10),
+  aes(x = reorder(Description, FoldEnrichment), y = FoldEnrichment, fill = FoldEnrichment)
+) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_gradient(low = "lightblue", high = "red") +
+  labs(title = "GO Enrichment: Wildtype Upregulated",
+       x = "GO Term", y = "Fold Enrichment") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 14),
+    axis.text.x = element_text(size = 14),
+    axis.title = element_text(size = 13)
+  )
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Ensure group labels exist (e.g., 'condition' column)
+Idents(harmony_nasal_filtered) <- "condition"
+
+# DE analysis
+de_results <- FindMarkers(
+  object = harmony_nasal_filtered,
+  ident.1 = "occlusion",
+  ident.2 = "wildtype",
+  logfc.threshold = 0,
+  min.pct = 0.1,
+  test.use = "wilcox"
+)
+
+# Add gene names as a column
+de_results$gene <- rownames(de_results)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
