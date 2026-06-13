@@ -6,22 +6,32 @@ This study investigated the molecular mechanisms underlying action potential ini
 
 ## Data Source:
 
+### Single-Cell RNA Sequencing Data: 
 Three publicly available single-cell RNA sequencing datasets were obtained from the NCBI Gene Expression Omnibus (GEO).
 
-Tan et al. (2020) — Homeostatic Olfactory Epithelium
-
+#### Tan et al. (2020) — Homeostatic Olfactory Epithelium
 GEO Accession: GSE146043 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE146043)
 Description: Single-cell RNA sequencing (10X Genomics) of the olfactory epithelium from four male adult wild-type mice (8–9 weeks old).
 
-Horgue et al. (2022) — Homeostatic Olfactory Epithelium
+#### Horgue et al. (2022) — Homeostatic Olfactory Epithelium
 GEO Accession: GSE185168 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE185168)
 Description: 3′ end scRNA sequencing (10X Genomics Chromium) of the mouse main olfactory epithelium from the nasal cavity of four male adult wild-type mice (8 weeks old).
 
 
-Van der Linden et al. (2020) — Naris Occlusion Model
-
+#### Van der Linden et al. (2020) — Naris Occlusion Model
 GEO Accession: GSE157119 (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157119)
 Description: Single-cell RNA sequencing of the olfactory epithelium from one male mouse that underwent unilateral naris occlusion of the right nostril via cauterisation at postnatal day 14 (P14). The olfactory epithelium was harvested and sequenced at approximately 5 weeks of age.
+
+### Axonal Initial Segment:
+Axonal initial segment (AIS) associated genes were obtained from two sources.
+
+#### Mouse AIS Genes:
+Mouse Genome Informatics (MGI) — The Jackson Laboratory
+URL: https://www.informatics.jax.org/
+
+#### Human AIS Genes:
+Ma'ayan Laboratory — Computational Systems Biology, Icahn School of Medicine at Mount Sinai
+URL: https://maayanlab.cloud/
 
 
 
